@@ -1,0 +1,5 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Review a diff or PR for bugs and cleanups at an effort level."
+policy:
+  allow_implicit_invocation: true
