@@ -1,0 +1,22 @@
+{
+  "name": "code-review-verifier",
+  "description": "Verify step of the code-review skill's workflows: pools and dedups the finders' candidates, has each one judged independently (one code-review-worker sub-agent per candidate when invoke_sub_agent is available), and writes verified.json. Writes only under ~/.local/state/kiro-code-review/runs/. Managed by the code-review skill, which overwrites this file when it differs from the shipped copy.",
+  "prompt": "You are the verify step of a code review that the code-review skill runs as a Kiro workflow. You pool and deduplicate the finders' candidates, have each candidate judged independently, and write the verified list. When the invoke_sub_agent tool is available, judge each candidate in its own code-review-worker sub-agent; otherwise judge them yourself one at a time, each as if you had seen no other. Apart from the one output file your task names you are read-only: never edit the reviewed repository, never commit, push, or post anything, and use git only to read. Your working directory is not the reviewed repository: use the absolute paths your task gives you, and search the reviewed checkout with `git -C <checkout> grep -n <pattern>`.",
+  "tools": ["read_file", "list_directory", "file_search", "grep_search", "execute_bash", "fs_write", "invoke_sub_agent", "subagent"],
+  "includeMcpJson": false,
+  "includePowers": false,
+  "permissions": {
+    "rules": [
+      { "capability": "fs_read", "effect": "allow" },
+      { "capability": "fs_write", "match": ["~/.local/state/kiro-code-review/runs/**"], "effect": "allow" },
+      { "capability": "shell", "match": ["git -C * log *", "git -C * show *", "git -C * blame *", "git -C * diff *", "git -C * grep *", "git -C * rev-parse *", "git -C * ls-files*", "gh pr view *"], "effect": "allow" },
+      { "capability": "subagent", "match": ["code-review-worker"], "effect": "allow" }
+    ]
+  },
+  "toolsSettings": {
+    "subagent": {
+      "availableAgents": ["code-review-worker"],
+      "trustedAgents": ["code-review-worker"]
+    }
+  }
+}

@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Review the current diff, a GitHub PR number, a branch, or a path for correctness bugs, plus reuse, simplification, efficiency, altitude, and conventions cleanups, at an effort level: minimal | low | medium | high | max (default medium). Use for code review, reviewing a PR or pull request, reviewing a branch or changes before commit, or finding bugs in a diff. Fans out finder and verifier subagents at medium and above. Flags: --comment posts findings as inline GitHub PR comments; --max-findings n|all sets the findings cap; --verify precision|recall|max overrides the verify policy."
+description: "Review the current diff, a GitHub PR number, a branch, or a path for correctness bugs, plus reuse, simplification, efficiency, altitude, and conventions cleanups, at an effort level: minimal | low | medium | high | max (default medium). Use for code review, reviewing a PR or pull request, reviewing a branch or changes before commit, or finding bugs in a diff. At medium and above, runs parallel finders and an independent verifier as a background Kiro workflow (falling back to sub-agents, then to a single in-context pass). Flags: --comment posts findings as inline GitHub PR comments; --max-findings n|all sets the findings cap; --verify precision|recall|max overrides the verify policy."
 ---
 
 Review the current diff, or a PR number/branch/path target, for correctness
@@ -74,35 +74,92 @@ Angle files:
 
 ## Run order
 
-The main agent gathers the diff, dedups, and writes the output. Subagents only
-find, verify, and sweep. Kiro fixes a subagent task graph before it starts,
-and the number of verifiers depends on dedup, so use separate dispatches.
+The main agent parses the arguments, gathers the diff once, and prints the
+output. At medium and above, finding, verifying, and sweeping run in a
+background Kiro workflow by default; in sub-agents, or in this context, only
+when no workflow can run.
 
 1. **Phase 0 — Gather the diff** (below). At low, the pass file's one-call
-   read replaces it.
+   read replaces it (for a PR target, that read is the Phase 0 PR command).
 2. **minimal / low**: read the level's pass file from the matrix, run it
-   yourself, and go to Output.
-3. **Subagents available?** If the `subagent` tool is not available in this
-   session, or dispatch 1 cannot start, read `references/fallback-inline.md`
-   and follow it instead of steps 4-7. If dispatch 2 or 3 fails after
-   dispatch 1 succeeded, keep the finder candidates you already have and
-   finish only the remaining phases in context, as that file describes.
-4. **Dispatch 1 — finders.** Read `references/finder-rules.md` and the
-   level's angle files. Start one general-purpose subagent per angle, all in
-   one parallel dispatch with no dependencies between them. Each prompt holds:
-   the level intro line; the diff text (if it is too large to paste, the exact
-   diff command and target — every finder must review the same diff, so never
-   let a finder pick its own target); the user's extra instructions; the text
-   of `references/finder-rules.md`; the text of exactly one angle file; and the
+   yourself, and go to Output (`route: inline`, `verification: none at this
+   level`).
+3. **Choose the route** (medium, high, max). Take the first that applies:
+   1. **Workflow route** — the `run_workflow` tool is available (listed among
+      your tools, or loadable through tool search). This is the default. Follow
+      "Workflow route" below.
+   2. **Sub-agent route** — only if `run_workflow` is not available but
+      `invoke_sub_agent` is. Follow "Sub-agent route" below.
+   3. **In-context** — neither tool is available. Read
+      `references/fallback-inline.md` and follow it.
+
+   `subagent` is only the tools-config and permissions name of the sub-agent
+   capability; the tool you call is `invoke_sub_agent`. In Kiro CLI with
+   Workflows enabled, the main chat often has only `run_workflow`; that is
+   expected, not an error.
+4. **Output**: read `references/output.md` and follow it. On the workflow
+   route, the workflow's report step writes the output for you (W5).
+5. **`--comment`**: after the output is printed, read
+   `references/github-comment.md` and follow it.
+
+## Workflow route
+
+Details, commands, and file formats: `references/workflow-route.md`. Read it
+before W1.
+
+- **W1 — Run folder.** Create
+  `~/.local/state/kiro-code-review/runs/<repo>-<target>-<stamp>/` (absolute
+  path; outside the reviewed repository). Write `diff.patch` (and
+  `diff.full.patch` when a scope filter ran), `pr.json` for a PR,
+  `instructions.md` (the extra free text, or `None.`), and `params.json`.
+- **W2 — Install.** Compare `<skill_dir>/assets/workflows/*.workflow.json`
+  with `~/.kiro/workflows/` and `<skill_dir>/assets/agents/*.json` with
+  `~/.kiro/agents/`; copy what is missing or different. If anything was
+  copied, tell the user once which files were installed or updated.
+- **W3 — Launch** `run_workflow` with `workflowPath` set to the absolute path
+  of `~/.kiro/workflows/code-review-8.workflow.json` (medium, high) or
+  `~/.kiro/workflows/code-review-10.workflow.json` (max), passing the ten
+  string inputs: `skill_dir`, `run_dir`, `repo_dir`, `diff_path`,
+  `instructions_path`, `level`, `level_intro`, `verify_policy` (after
+  `--verify`), `candidate_cap`, `findings_cap` (after `--max-findings`).
+- **W4 — Hand off.** `run_workflow` returns at once. Reply in one short
+  message that the review is running in the background, with the workflow id
+  and the run folder, then **end your turn**. Do not poll.
+- **W5 — Completion.** When the report step's `code review findings ready:
+  <run_dir>/findings.md` message or a run-completed notification arrives, read
+  `<run_dir>/findings.md` and print it verbatim. Then, if `--comment` was
+  given, follow `references/github-comment.md` using `<run_dir>/findings.json`.
+- **W6 — Failure.** If the run failed or paused, or the launch failed, report
+  which steps failed and what the run folder holds, and offer to retry in the
+  workflow or to finish in context with `references/fallback-inline.md` (its
+  partial-fallback paragraph).
+
+## Sub-agent route
+
+Kiro fixes a sub-agent task graph before it starts, and the number of
+verifiers depends on dedup, so use separate dispatches. If dispatch 1 cannot
+start, follow `references/fallback-inline.md` instead. If dispatch 2 or 3
+fails after dispatch 1 succeeded, keep the finder candidates you already have
+and finish only the remaining phases in context, as that file describes.
+
+1. **Dispatch 1 — finders.** Read `references/finder-rules.md` and the
+   level's angle files. Start one general-purpose sub-agent per angle with
+   `invoke_sub_agent`, all in one parallel dispatch with no dependencies
+   between them. Each prompt holds: the level intro line; the diff text (if it
+   is too large to paste, the path of a file holding it, or the exact diff
+   command and target — every finder must review the same diff, so never let
+   a finder pick its own target); the user's extra instructions; the text of
+   `references/finder-rules.md`; the text of exactly one angle file; and the
    candidate cap.
-5. **Dedup** the pooled candidates (below).
-6. **Dispatch 2 — verifiers.** Read `references/verify.md` and run one
-   verifier subagent per deduplicated candidate, under the policy in effect.
+2. **Dedup** the pooled candidates by `references/dedup.md`.
+3. **Dispatch 2 — verifiers.** Read `references/verify.md` and run one
+   verifier sub-agent per deduplicated candidate, under the policy in effect.
    If no candidates remain, skip this step.
-7. **Dispatch 3 — sweep (max only).** Read `references/gap-sweep.md` and run
-   one fresh sweep subagent with the current list.
-8. **Output** (below).
-9. **`--comment`**: read `references/github-comment.md` and follow it.
+4. **Dispatch 3 — sweep (max only).** Read `references/gap-sweep.md` and run
+   one fresh sweep sub-agent with the current list.
+
+The run line says `route: sub-agents` and `verification: independent — one
+verifier sub-agent per candidate`.
 
 ## Phase 0 — Gather the diff
 
@@ -113,64 +170,43 @@ include the working-tree changes in scope — the review often runs before the
 commit. If a PR number, branch name, or file path was passed as an argument,
 review that target instead. Treat this diff as the review scope.
 
-- **PR**: run `gh pr view <pr> --json title,body,baseRefName,headRefName,url`
-  for context and `gh pr diff <pr>` for the unified diff. The PR's diff is the
-  only review scope — local working-tree changes are out of scope. When you
-  need surrounding code, read the files in this checkout if it matches the PR's
-  branch; otherwise fetch file contents with `gh`. If `gh` is missing or not
-  authenticated, say so and ask for a branch or path target.
+- **PR**: always run `gh pr view <pr> --json title,body,baseRefName,headRefName,headRefOid,url`
+  for context and `gh pr diff <pr> --color never --allow-escape-sequences > <file>`
+  for the unified diff, then read the file (`gh pr diff` refuses to write
+  escape sequences to a pipe without that flag, and the raw diff must not go
+  to the terminal). For a PR URL, add `--repo <owner>/<repo>` to both. On the
+  workflow route the file is `<run_dir>/diff.patch`; otherwise put it in a run
+  folder named as in `references/workflow-route.md` (W1). The PR's diff is the
+  only review scope — local working-tree changes are out of scope. Never
+  substitute a local `git diff` for it (not against `main` or `origin/main`,
+  and not even when a local branch looks the same). When you need surrounding
+  code, read the files in this checkout, or in a worktree of it, if its
+  `HEAD` is the PR's `headRefOid`; otherwise fetch file contents with `gh` or
+  `git show <headRefOid>:<path>`. If `gh` is missing or not authenticated,
+  say so and ask for a branch or path target.
 - **Branch**: `git diff main...<branch>` (use the repo's default branch if it
   is not `main`).
 - **Path**: the default commands above, limited with `-- <path>`.
+- **Scope restriction**: when the extra instructions limit the review to files
+  by glob or type (for example "only Rust files" → `*.rs`), filter the diff
+  with `scripts/filter-diff.py` as `references/workflow-route.md` (W1)
+  describes, and say in the notes how many changed files were kept.
 
 If the diff is empty, say there is nothing to review and stop.
 
 ## Dedup
 
-Pool all candidates. Dedup near-duplicates only: same defect, same location,
-same reason → keep one, the one with the most concrete failure scenario. Do
-NOT let one angle's conclusions suppress another's — if two angles flag the
-same line for different reasons, record both.
+The rule is in `references/dedup.md`. On the workflow route the verify step
+applies it; on the sub-agent and in-context routes you do.
 
 ## Output
 
-Write the review as plain markdown in your reply. The markdown is the report:
-no tool call, no file.
-
-Rank findings most-severe first. If more than the cap survive, keep the cap's
-number of most severe; with `all`, keep every finding that survives — there is
-no maximum. Correctness bugs always outrank cleanup and altitude findings when
-the cap forces a cut.
-
-```markdown
-## Code review — <level> effort
-
-Run: <pipeline from the matrix> · verify policy: <precision | recall | max | none> · cap: <n | all> · fallback: <no | yes — single pass without subagents; no independent verification ran | partial — <phases> ran in context; not independent>
-Target: <current diff | PR #n | branch | path>
-Notes: <unknown level, ignored flags, invalid values — omit the line if none>
-
-### 1. `path/to/file.ext:123` — <short summary>
-
-- **Category:** correctness
-- **Verdict:** CONFIRMED
-- **Summary:** <one-sentence statement of the issue>
-- **Failure scenario:** <concrete inputs/state → wrong output or crash; for a cleanup, the concrete cost>
-```
-
-- Every finding cites `file:line`.
-- The short summary is the claim compressed to ≤60 characters, no rationale or
-  consequence clause.
-- Category is the slug from the finder: `correctness`, `simplification`,
-  `efficiency`, `reuse`, `altitude`, `conventions`, or a more specific slug like
-  `test-coverage`.
-- Include **Verdict** only when a verify pass produced one: the verifier's vote,
-  `<vote> (self-check)` in the fallback, or `unverified (sweep)` for sweep
-  additions.
-- If nothing survives, write the header lines and then exactly: No findings
-  survived verification.
+The format, the cap, and the ranking order (most severe first; CONFIRMED
+before PLAUSIBLE; correctness before cleanup unless a cleanup finding is
+clearly more severe) are in `references/output.md`. The run line, Target, and
+Notes are separate list items, and the run line names the route and whether
+verification was independent.
 
 ## Future extensions (not implemented)
 
 - GitLab `--comment`: one general MR note via `glab mr note`.
-- A workflow-backed `max` run (find → verify → sweep → report as separate
-  steps with durable intermediate files) for very large diffs.
