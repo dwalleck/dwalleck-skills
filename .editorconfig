@@ -1,0 +1,7 @@
+root = true
+
+[*.cs]
+# Require braces on every if/else/for/foreach/while/using body, even single statements.
+# Enforced at build time when the project sets <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>.
+csharp_prefer_braces = true:warning
+dotnet_diagnostic.IDE0011.severity = warning
