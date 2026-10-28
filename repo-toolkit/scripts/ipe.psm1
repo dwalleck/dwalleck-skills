@@ -1797,6 +1797,21 @@ function Stop-TestHosts
     return [pscustomobject]@{ ExitCode = 0; Processes = $found.ToArray(); Killed = $killed; Report = $report.ToArray() }
 }
 
+function Get-IpeTextShape
+{
+    # BOM and newline counts of a file's bytes. Latin-1 maps every byte to one char, so counting never alters bytes.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+
+    $utf16 = $Bytes.Length -ge 2 -and (($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) -or ($Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF))
+    $latin = [System.Text.Encoding]::Latin1.GetString($Bytes)
+    $bom = $Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF
+    $lf = $latin.Length - $latin.Replace("`n", '').Length
+    $crlf = [int](($latin.Length - $latin.Replace("`r`n", '').Length) / 2)
+    $bareLf = $lf - $crlf
+    $style = if ($crlf -gt 0 -and $bareLf -gt 0) { 'mixed' } elseif ($crlf -gt 0) { 'CRLF' } elseif ($bareLf -gt 0) { 'LF' } else { 'none' }
+    return [pscustomobject]@{ Utf16 = $utf16; Bom = $bom; Crlf = $crlf; Lf = $bareLf; Style = $style }
+}
+
 function Test-LineEndings
 {
     [CmdletBinding()]
@@ -1846,19 +1861,17 @@ function Test-LineEndings
         }
 
         $bytes = [System.IO.File]::ReadAllBytes($full)
-        if ($bytes.Length -ge 2 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF)))
+        $shape = Get-IpeTextShape -Bytes $bytes
+        if ($shape.Utf16)
         {
             $report.Add("skip $($candidate.Path): UTF-16 file, not checked")
             continue
         }
 
-        # Latin-1 maps every byte to one char, so counting and converting newlines never alters other bytes.
-        $latin = [System.Text.Encoding]::Latin1.GetString($bytes)
-        $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
-        $lf = $latin.Length - $latin.Replace("`n", '').Length
-        $crlf = [int](($latin.Length - $latin.Replace("`r`n", '').Length) / 2)
-        $bareLf = $lf - $crlf
-        $style = if ($crlf -gt 0 -and $bareLf -gt 0) { 'mixed' } elseif ($crlf -gt 0) { 'CRLF' } elseif ($bareLf -gt 0) { 'LF' } else { 'none' }
+        $hasBom = $shape.Bom
+        $crlf = $shape.Crlf
+        $bareLf = $shape.Lf
+        $style = $shape.Style
         $problems = [System.Collections.Generic.List[string]]::new()
         $notes = [System.Collections.Generic.List[string]]::new()
         $baseBom = $null
@@ -1894,6 +1907,8 @@ function Test-LineEndings
         {
             if ($Fix)
             {
+                # Latin-1 maps every byte to one char, so converting newlines never alters other bytes.
+                $latin = [System.Text.Encoding]::Latin1.GetString($bytes)
                 $target = if ($autocrlf -or $crlf -ge $bareLf) { "`r`n" } else { "`n" }
                 $converted = ConvertTo-IpeNewline -Text $latin -Newline $target
                 [System.IO.File]::WriteAllBytes($full, [System.Text.Encoding]::Latin1.GetBytes($converted))
@@ -2326,7 +2341,8 @@ function Get-IpeDirtyPaths
 {
     # Changed, staged and untracked paths (repo-relative, '/'), without the tree's own log directory. UnstagedOnly
     # leaves out changes that are only staged (a merge waiting for its commit), keeping working-tree and untracked ones.
-    param([Parameter(Mandatory)][string]$Worktree, [Parameter(Mandatory)][hashtable]$Config, [string[]]$Pathspec = @(), [switch]$UnstagedOnly)
+    # NoOptionalLocks stops git status from refreshing the index's stat cache, for callers that must not touch the tree.
+    param([Parameter(Mandatory)][string]$Worktree, [Parameter(Mandatory)][hashtable]$Config, [string[]]$Pathspec = @(), [switch]$UnstagedOnly, [switch]$NoOptionalLocks)
 
     $arguments = [System.Collections.Generic.List[string]]@('status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames')
     if ($Pathspec.Count -gt 0)
@@ -2335,7 +2351,8 @@ function Get-IpeDirtyPaths
         $arguments.AddRange([string[]]@($Pathspec | ForEach-Object { $_.Replace('\', '/') }))
     }
 
-    $result = Invoke-Git -Worktree $Worktree -Arguments $arguments.ToArray()
+    $environment = if ($NoOptionalLocks) { @{ GIT_OPTIONAL_LOCKS = '0' } } else { $null }
+    $result = Invoke-Git -Worktree $Worktree -Arguments $arguments.ToArray() -Environment $environment
     $logPrefix = $Config.LogDir.Replace('\', '/').TrimEnd('/') + '/'
     $paths = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in (Split-IpeNul $result.StdOut))
@@ -4416,6 +4433,35 @@ function Invoke-IpeMergeVerification
     }
 }
 
+function Get-IpeDeniedPathReasons
+{
+    # Why a repo-relative '/' path is never committed: a denied path segment, a denied file name, or the log directory.
+    param([Parameter(Mandatory)][string]$RelativePath, [Parameter(Mandatory)][hashtable]$Config)
+
+    $reasons = [System.Collections.Generic.List[string]]::new()
+    $segments = $RelativePath.Split('/')
+    foreach ($deny in @($Config.Commit.DenySegments))
+    {
+        if (@($segments | Where-Object { $_ -ieq $deny }).Count -gt 0)
+        {
+            $reasons.Add("$RelativePath has a '$deny' path segment, which is never committed")
+        }
+    }
+
+    if (@($Config.Commit.DenyNames) -icontains $segments[-1])
+    {
+        $reasons.Add("$RelativePath is named $($segments[-1]), which is never committed")
+    }
+
+    $logPrefix = $Config.LogDir.Replace('\', '/').Trim('/') + '/'
+    if ($RelativePath.StartsWith($logPrefix, [System.StringComparison]::OrdinalIgnoreCase))
+    {
+        $reasons.Add("$RelativePath is under the log directory $($Config.LogDir)")
+    }
+
+    return , $reasons.ToArray()
+}
+
 function Commit-Change
 {
     [CmdletBinding(DefaultParameterSetName = 'Message')]
@@ -4453,7 +4499,6 @@ function Commit-Change
     }
 
     $roots = [string[]]@($top, (Get-IpeNormalPath $Worktree))
-    $logPrefix = $config.LogDir.Replace('\', '/').Trim('/') + '/'
     $wanted = [System.Collections.Generic.List[string]]::new()
     $wantedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($path in $Paths)
@@ -4471,24 +4516,7 @@ function Commit-Change
         }
 
         $wanted.Add($relative)
-        $segments = $relative.Split('/')
-        foreach ($deny in @($config.Commit.DenySegments))
-        {
-            if (@($segments | Where-Object { $_ -ieq $deny }).Count -gt 0)
-            {
-                $problems.Add("$relative has a '$deny' path segment, which is never committed")
-            }
-        }
-
-        if (@($config.Commit.DenyNames) -icontains $segments[-1])
-        {
-            $problems.Add("$relative is named $($segments[-1]), which is never committed")
-        }
-
-        if ($relative.StartsWith($logPrefix, [System.StringComparison]::OrdinalIgnoreCase))
-        {
-            $problems.Add("$relative is under the log directory $($config.LogDir)")
-        }
+        $problems.AddRange([string[]](Get-IpeDeniedPathReasons -RelativePath $relative -Config $config))
 
         $full = Join-IpeTreePath -Root $top -Relative $relative
         if (Test-Path -LiteralPath $full -PathType Container)
@@ -5151,6 +5179,469 @@ function Export-ReviewFindings
     }
 }
 
+# ReviewBundle -------------------------------------------------------------------------------------------------------
+
+$script:BundleFiles = @('index.md', 'log.txt', 'diffstat.txt', 'diff.patch', 'files.md', 'denied-paths.txt', 'status.txt')
+$script:BundleCheckDirectory = 'full-check'
+$script:BundleTitle = '# Review bundle '
+
+function Invoke-IpeReadOnlyGit
+{
+    # A git call for ReviewBundle: unquoted paths, and GIT_OPTIONAL_LOCKS=0 so no command refreshes the index.
+    param(
+        [Parameter(Mandatory)][string]$Tree,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][int]$TimeoutSeconds,
+        [int[]]$AllowExitCodes = @(0),
+        [switch]$Bytes
+    )
+
+    $allArguments = [string[]](@('-c', 'core.quotepath=false') + $Arguments)
+    return Invoke-Git -Worktree $Tree -Arguments $allArguments -TimeoutSeconds $TimeoutSeconds -AllowExitCodes $AllowExitCodes -Bytes:$Bytes -Environment @{ GIT_OPTIONAL_LOCKS = '0' }
+}
+
+function Write-IpeBundleText
+{
+    # Bundle text files are UTF-8 without a BOM, with LF newlines and a final newline.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines)
+
+    $text = ($Lines -join "`n").Replace("`r`n", "`n") + "`n"
+    [System.IO.File]::WriteAllText($Path, $text, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-IpeBundleBlob
+{
+    # The bytes of Path at Revision, or $null when the entry is not a blob (a submodule, for example).
+    param([Parameter(Mandatory)][string]$Tree, [Parameter(Mandatory)][string]$Revision, [Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int]$TimeoutSeconds)
+
+    $result = Invoke-IpeReadOnlyGit -Tree $Tree -Arguments @('cat-file', 'blob', "${Revision}:$Path") -TimeoutSeconds $TimeoutSeconds -AllowExitCodes @(0, 128) -Bytes
+    if ($result.ExitCode -ne 0)
+    {
+        return $null
+    }
+
+    return , [byte[]]$result.Bytes
+}
+
+function Get-IpeBundleSide
+{
+    # The BOM and line-ending cells of one side (before or after) of a changed file; $null Bytes means it is absent.
+    param([AllowNull()][byte[]]$Bytes, [Parameter(Mandatory)][bool]$IsText)
+
+    if ($null -eq $Bytes)
+    {
+        return [pscustomobject]@{ Checked = $false; Bom = $false; Style = $null; BomCell = '-'; EndingCell = '-' }
+    }
+
+    if (-not $IsText)
+    {
+        return [pscustomobject]@{ Checked = $false; Bom = $false; Style = $null; BomCell = 'not checked (extension)'; EndingCell = 'not checked (extension)' }
+    }
+
+    $shape = Get-IpeTextShape -Bytes $Bytes
+    if ($shape.Utf16)
+    {
+        return [pscustomobject]@{ Checked = $false; Bom = $false; Style = $null; BomCell = 'UTF-16, not checked'; EndingCell = 'UTF-16, not checked' }
+    }
+
+    $ending = switch ($shape.Style)
+    {
+        'mixed' { "mixed (CRLF $($shape.Crlf), LF $($shape.Lf))" }
+        'CRLF' { "CRLF ($($shape.Crlf))" }
+        'LF' { "LF ($($shape.Lf))" }
+        default { 'none' }
+    }
+
+    return [pscustomobject]@{ Checked = $true; Bom = $shape.Bom; Style = $shape.Style; BomCell = $(if ($shape.Bom) { 'BOM' } else { 'no BOM' }); EndingCell = $ending }
+}
+
+function Assert-IpeBundleOut
+{
+    # Applies ReviewBundle's -Out rules before anything is deleted or written. Returns the normalised path and whether
+    # it holds a previous bundle, whose own entries may then be replaced.
+    param([Parameter(Mandatory)][string]$Out, [Parameter(Mandatory)][string]$Top, [Parameter(Mandatory)][string]$Worktree, [Parameter(Mandatory)][int]$TimeoutSeconds)
+
+    $full = Get-IpeNormalPath $Out
+    $roots = [string[]]@($Top, (Get-IpeNormalPath $Worktree))
+    $insideMessage = "-Out $Out is inside $Top and not ignored; it would change the tree"
+    foreach ($root in $roots)
+    {
+        if (Test-IpeSamePath $full $root)
+        {
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message $insideMessage -Category InvalidArgument)
+        }
+    }
+
+    foreach ($flag in @('--git-dir', '--git-common-dir'))
+    {
+        $lines = (Invoke-IpeReadOnlyGit -Tree $Top -Arguments @('rev-parse', '--path-format=absolute', $flag) -TimeoutSeconds $TimeoutSeconds).Lines
+        $gitDirectory = Get-IpeNormalPath $lines[0]
+        if ((Test-IpeSamePath $full $gitDirectory) -or $null -ne (ConvertTo-IpeRepoPath -Roots @($gitDirectory) -Path $full))
+        {
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "-Out $Out is inside the git directory $gitDirectory" -Category InvalidArgument)
+        }
+    }
+
+    $relative = ConvertTo-IpeRepoPath -Roots $roots -Path $full
+    if ($null -ne $relative)
+    {
+        # Fails closed: anything but "ignored" (exit 0), including a git error, refuses the path.
+        $ignored = Invoke-IpeReadOnlyGit -Tree $Top -Arguments @('check-ignore', '-q', '--', $relative) -TimeoutSeconds $TimeoutSeconds -AllowExitCodes @(0, 1, 128)
+        if ($ignored.ExitCode -ne 0)
+        {
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message $insideMessage -Category InvalidArgument)
+        }
+    }
+
+    if (Test-Path -LiteralPath $full -PathType Leaf)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "-Out $Out is a file" -Category InvalidArgument)
+    }
+
+    $previous = $false
+    if (Test-Path -LiteralPath $full -PathType Container)
+    {
+        $entries = @(Get-ChildItem -LiteralPath $full -Force)
+        if ($entries.Count -gt 0)
+        {
+            $foreign = [System.Collections.Generic.List[string]]::new()
+            foreach ($entry in $entries)
+            {
+                if (-not $entry.PSIsContainer -and $script:BundleFiles -contains $entry.Name)
+                {
+                    continue
+                }
+
+                if ($entry.PSIsContainer -and $entry.Name -ieq $script:BundleCheckDirectory)
+                {
+                    foreach ($inner in @(Get-ChildItem -LiteralPath $entry.FullName -Force))
+                    {
+                        if ($inner.PSIsContainer -or -not ($inner.Name -like '*-summary.txt' -or $inner.Name -ieq 'last-full-check.json'))
+                        {
+                            $foreign.Add("$($script:BundleCheckDirectory)\$($inner.Name)")
+                        }
+                    }
+
+                    continue
+                }
+
+                $foreign.Add($entry.Name)
+            }
+
+            $indexPath = Join-Path $full 'index.md'
+            $titled = $false
+            if (Test-Path -LiteralPath $indexPath -PathType Leaf)
+            {
+                $reader = [System.IO.StreamReader]::new($indexPath, [System.Text.UTF8Encoding]::new($false), $true)
+                try
+                {
+                    $first = $reader.ReadLine()
+                }
+                finally
+                {
+                    $reader.Dispose()
+                }
+
+                $titled = $null -ne $first -and $first.StartsWith($script:BundleTitle, [System.StringComparison]::Ordinal)
+            }
+
+            $names = @(if ($titled) { $foreign.ToArray() } else { $entries | ForEach-Object { $_.Name } })
+            if ($names.Count -gt 0)
+            {
+                throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "-Out $Out holds files that are not a review bundle: $(@($names | Select-Object -First 5) -join ', '); pass a new or empty directory" -Category InvalidArgument)
+            }
+
+            $previous = $true
+        }
+    }
+
+    return [pscustomobject]@{ Path = $full; Previous = $previous }
+}
+
+function ReviewBundle
+{
+    # Writes the evidence a reviewer reads into -Out without changing the tree: log, diff stat, byte-exact diff, per-file
+    # BOM and line endings before and after, denied paths, uncommitted paths, full-check summaries, and an index.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Worktree,
+        [Parameter(Mandatory)][string]$Base,
+        [Parameter(Mandatory)][string]$Out,
+        [string]$Tag = 'review',
+        [string]$ConfigPath
+    )
+
+    Assert-IpeAbsolutePath -Path $Worktree -Name 'Worktree'
+    Assert-IpeAbsolutePath -Path $Out -Name 'Out'
+    Assert-IpeName -Value $Tag -Name 'Tag'
+    $top = Get-IpeTopLevel -Worktree $Worktree
+    $config = Resolve-IpeConfig -Worktree $Worktree -ConfigPath $ConfigPath -Optional
+    $seconds = if ($config) { $config.Timeouts.GitSeconds } else { $script:DefaultGitSeconds }
+    $denySegments = [System.Collections.Generic.List[string]]::new()
+    $denyNames = [string[]]@()
+    if ($config)
+    {
+        $denySegments.AddRange([string[]]@($config.Commit.DenySegments))
+        $denyNames = [string[]]@($config.Commit.DenyNames)
+    }
+
+    if (-not ($denySegments -icontains '.vs'))
+    {
+        $denySegments.Add('.vs')
+    }
+
+    $logDir = if ($config) { $config.LogDir } else { $script:DefaultLogDir }
+    $rules = @{ LogDir = $logDir; Commit = @{ DenySegments = $denySegments.ToArray(); DenyNames = $denyNames } }
+
+    $notCommit = "-Base '$Base' is not a commit in $top"
+    if ($Base.StartsWith('-'))
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message $notCommit -Category InvalidArgument)
+    }
+
+    $baseResult = Invoke-IpeReadOnlyGit -Tree $top -Arguments @('rev-parse', '--verify', '--quiet', "$Base^{commit}") -TimeoutSeconds $seconds -AllowExitCodes @(0, 1, 128)
+    if ($baseResult.ExitCode -ne 0 -or $baseResult.Lines.Count -eq 0)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message $notCommit -Category InvalidArgument)
+    }
+
+    $baseSha = $baseResult.Lines[0].Trim()
+    $head = (Invoke-IpeReadOnlyGit -Tree $top -Arguments @('rev-parse', 'HEAD') -TimeoutSeconds $seconds).Lines[0].Trim()
+    $mergeBaseResult = Invoke-IpeReadOnlyGit -Tree $top -Arguments @('merge-base', $baseSha, $head) -TimeoutSeconds $seconds -AllowExitCodes @(0, 1)
+    if ($mergeBaseResult.ExitCode -ne 0 -or $mergeBaseResult.Lines.Count -eq 0)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "-Base '$Base' ($baseSha) and HEAD have no common ancestor in $top" -Category InvalidArgument)
+    }
+
+    $mergeBase = $mergeBaseResult.Lines[0].Trim()
+    $target = Assert-IpeBundleOut -Out $Out -Top $top -Worktree $Worktree -TimeoutSeconds $seconds
+
+    # Everything is read before -Out is touched, so a failing git call leaves no partial bundle.
+    $branchResult = Invoke-IpeReadOnlyGit -Tree $top -Arguments @('symbolic-ref', '--short', '-q', 'HEAD') -TimeoutSeconds $seconds -AllowExitCodes @(0, 1)
+    $branch = if ($branchResult.ExitCode -eq 0 -and $branchResult.Lines.Count -gt 0) { $branchResult.Lines[0].Trim() } else { '(detached HEAD)' }
+    $logLines = Split-IpeLines (Invoke-IpeReadOnlyGit -Tree $top -Arguments @('log', '--no-color', '--no-decorate', '--format=fuller', "$baseSha..$head") -TimeoutSeconds $seconds).StdOut
+    $commitCount = [int](Invoke-IpeReadOnlyGit -Tree $top -Arguments @('rev-list', '--count', "$baseSha..$head") -TimeoutSeconds $seconds).Lines[0].Trim()
+    $statLines = Split-IpeLines (Invoke-IpeReadOnlyGit -Tree $top -Arguments @('diff', '--no-color', '--no-ext-diff', '-M', '--stat=200', $mergeBase, $head) -TimeoutSeconds $seconds).StdOut
+    $patch = (Invoke-IpeReadOnlyGit -Tree $top -Arguments @('diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', $mergeBase, $head) -TimeoutSeconds $seconds -Bytes).Bytes
+    $tokens = Split-IpeNul (Invoke-IpeReadOnlyGit -Tree $top -Arguments @('diff', '--name-status', '--no-renames', '-z', $mergeBase, $head) -TimeoutSeconds $seconds).StdOut
+
+    $mergeShort = $mergeBase.Substring(0, 12)
+    $headShort = $head.Substring(0, 12)
+    $fileLines = [System.Collections.Generic.List[string]]::new()
+    $fileLines.Add("# Changed files ($mergeShort..$headShort)")
+    $fileLines.Add('')
+    $deniedLines = [System.Collections.Generic.List[string]]::new()
+    $flagCounts = [ordered]@{ 'BOM added' = 0; 'BOM removed' = 0; 'mixed' = 0 }
+    $changedCount = 0
+    $deniedCount = 0
+    for ($i = 0; $i + 1 -lt $tokens.Count; $i += 2)
+    {
+        $status = $tokens[$i]
+        $path = $tokens[$i + 1]
+        if ($changedCount -eq 0)
+        {
+            $fileLines.Add('| Path | Status | BOM before | BOM after | Line endings before | Line endings after | Flags |')
+            $fileLines.Add('|---|---|---|---|---|---|---|')
+        }
+
+        $changedCount++
+        $isText = $script:TextExtensions -contains [System.IO.Path]::GetExtension($path).ToLowerInvariant()
+        $beforeBytes = $null
+        if ($status -ne 'A')
+        {
+            $beforeBytes = Get-IpeBundleBlob -Tree $top -Revision $mergeBase -Path $path -TimeoutSeconds $seconds
+        }
+
+        $afterBytes = $null
+        if ($status -ne 'D')
+        {
+            $afterBytes = Get-IpeBundleBlob -Tree $top -Revision $head -Path $path -TimeoutSeconds $seconds
+        }
+
+        $before = Get-IpeBundleSide -Bytes $beforeBytes -IsText $isText
+        $after = Get-IpeBundleSide -Bytes $afterBytes -IsText $isText
+        $flags = [System.Collections.Generic.List[string]]::new()
+        if ($before.Checked -and $after.Checked -and $after.Bom -and -not $before.Bom)
+        {
+            $flags.Add('BOM added')
+        }
+        elseif ($before.Checked -and $after.Checked -and $before.Bom -and -not $after.Bom)
+        {
+            $flags.Add('BOM removed')
+        }
+
+        if ($after.Checked -and $after.Style -eq 'mixed')
+        {
+            $flags.Add('mixed')
+        }
+
+        foreach ($flag in $flags)
+        {
+            $flagCounts[$flag]++
+        }
+
+        $cells = @((ConvertTo-IpeTableValue $path), $status, $before.BomCell, $after.BomCell, $before.EndingCell, $after.EndingCell, ($flags -join ', '))
+        $fileLines.Add('| ' + ($cells -join ' | ') + ' |')
+        $reasons = Get-IpeDeniedPathReasons -RelativePath $path -Config $rules
+        if ($reasons.Count -gt 0)
+        {
+            $deniedCount++
+            $deniedLines.Add("${path}: $($reasons -join '; ')")
+        }
+    }
+
+    if ($changedCount -eq 0)
+    {
+        $fileLines.Add('no changes')
+    }
+
+    if ($deniedLines.Count -eq 0)
+    {
+        $deniedLines.Add('none')
+    }
+
+    $dirty = Get-IpeDirtyPaths -Worktree $top -Config $rules -NoOptionalLocks
+    $statusLines = if ($dirty.Count -eq 0) { [string[]]@('clean') } else { $dirty }
+    $logDirectory = Join-IpeTreePath -Root $top -Relative $logDir
+    $copies = [System.Collections.Generic.List[object]]::new()
+    if (Test-Path -LiteralPath $logDirectory -PathType Container)
+    {
+        foreach ($file in @(Get-ChildItem -LiteralPath $logDirectory -File -Force | Where-Object { $_.Name -like '*-summary.txt' -or $_.Name -ieq 'last-full-check.json' } | Sort-Object Name))
+        {
+            $copies.Add([pscustomobject]@{ Name = $file.Name; Bytes = [System.IO.File]::ReadAllBytes($file.FullName) })
+        }
+    }
+
+    $recordLine = 'no record'
+    $recordPath = Join-Path $logDirectory 'last-full-check.json'
+    if (Test-Path -LiteralPath $recordPath -PathType Leaf)
+    {
+        try
+        {
+            $record = Read-IpeJsonFile -Path $recordPath -ErrorId 'Ipe.RecordInvalid'
+            $recordHead = [string](Get-IpeJsonValue $record 'head')
+            $headText = if ($recordHead -eq $head) { 'head equals HEAD' } else { "head $recordHead is not HEAD" }
+            $recordDirty = @(@(Get-IpeJsonValue $record 'dirtyPaths') | Where-Object { $_ }).Count
+            $recordLine = "result $([string](Get-IpeJsonValue $record 'result')), $headText, $recordDirty dirty path(s)"
+        }
+        catch
+        {
+            if ((Get-IpeErrorId $_) -ne 'Ipe.RecordInvalid')
+            {
+                throw
+            }
+
+            $recordLine = "unreadable: $($_.Exception.Message)"
+        }
+    }
+
+    $flagTotal = ($flagCounts.Values | Measure-Object -Sum).Sum
+    $flagText = ($flagCounts.Keys | ForEach-Object { "$_ $($flagCounts[$_])" }) -join ', '
+    $index = [System.Collections.Generic.List[string]]::new()
+    $index.Add("$($script:BundleTitle)$Tag")
+    $index.Add('')
+    $index.Add('| Field | Value |')
+    $index.Add('|---|---|')
+    $index.Add("| Tree | $(ConvertTo-IpeTableValue $top) |")
+    $index.Add("| Branch | $(ConvertTo-IpeTableValue $branch) |")
+    $index.Add("| Base | $(ConvertTo-IpeTableValue $Base) ($baseSha) |")
+    $index.Add("| Merge base | $mergeBase |")
+    $index.Add("| HEAD | $head |")
+    $index.Add("| Commits (base..HEAD) | $commitCount |")
+    $index.Add("| Changed files (merge-base..HEAD) | $changedCount |")
+    $index.Add("| Line-ending flags | $flagTotal ($flagText) |")
+    $index.Add("| Denied paths | $deniedCount |")
+    $index.Add("| Uncommitted paths | $($dirty.Count) |")
+    $index.Add("| Full-check record | $(ConvertTo-IpeTableValue $recordLine) |")
+    $index.Add('')
+    $index.Add('| File | Content |')
+    $index.Add('|---|---|')
+    $index.Add('| `log.txt` | commits in base..HEAD (`git log --format=fuller`) |')
+    $index.Add('| `diffstat.txt` | `git diff --stat` of merge-base..HEAD |')
+    $index.Add('| `diff.patch` | the full diff of merge-base..HEAD, byte for byte |')
+    $index.Add('| `files.md` | each changed file: status, BOM and line endings before and after, flags |')
+    $index.Add('| `denied-paths.txt` | changed paths that are never committed, with the reason |')
+    $index.Add('| `status.txt` | uncommitted paths in the tree (listed, not diffed) |')
+    if ($copies.Count -gt 0)
+    {
+        $index.Add("| ``$($script:BundleCheckDirectory)/`` | copies of $(ConvertTo-IpeTableValue $logDir)\*-summary.txt and last-full-check.json |")
+    }
+
+    $index.Add('')
+    $index.Add('The bundle covers committed state only. Line endings are those of the committed blobs.')
+
+    $outPath = $target.Path
+    $report = [System.Collections.Generic.List[string]]::new()
+    try
+    {
+        if ($target.Previous)
+        {
+            foreach ($name in $script:BundleFiles)
+            {
+                $previousFile = Join-Path $outPath $name
+                if (Test-Path -LiteralPath $previousFile -PathType Leaf)
+                {
+                    Remove-Item -LiteralPath $previousFile -Force
+                }
+            }
+
+            $previousChecks = Join-Path $outPath $script:BundleCheckDirectory
+            if (Test-Path -LiteralPath $previousChecks -PathType Container)
+            {
+                Remove-Item -LiteralPath $previousChecks -Recurse -Force
+            }
+        }
+
+        [void][System.IO.Directory]::CreateDirectory($outPath)
+        $texts = [ordered]@{
+            'log.txt' = $(if ($logLines.Count -gt 0) { $logLines } else { [string[]]@('no commits') })
+            'diffstat.txt' = $(if ($statLines.Count -gt 0) { $statLines } else { [string[]]@('no changes') })
+            'files.md' = $fileLines.ToArray()
+            'denied-paths.txt' = $deniedLines.ToArray()
+            'status.txt' = [string[]]$statusLines
+        }
+        foreach ($name in $texts.Keys)
+        {
+            $path = Join-Path $outPath $name
+            Write-IpeBundleText -Path $path -Lines ([string[]]@($texts[$name]))
+            $report.Add("wrote $path")
+        }
+
+        $patchPath = Join-Path $outPath 'diff.patch'
+        [System.IO.File]::WriteAllBytes($patchPath, [byte[]]$patch)
+        $report.Add("wrote $patchPath")
+        if ($copies.Count -gt 0)
+        {
+            $checkDirectory = Join-Path $outPath $script:BundleCheckDirectory
+            [void][System.IO.Directory]::CreateDirectory($checkDirectory)
+            foreach ($copy in $copies)
+            {
+                $path = Join-Path $checkDirectory $copy.Name
+                [System.IO.File]::WriteAllBytes($path, [byte[]]$copy.Bytes)
+                $report.Add("wrote $path")
+            }
+        }
+
+        $indexPath = Join-Path $outPath 'index.md'
+        Write-IpeBundleText -Path $indexPath -Lines $index.ToArray()
+        $report.Add("wrote $indexPath")
+    }
+    catch
+    {
+        throw (New-IpeErrorRecord -ErrorId (Get-IpeErrorId $_) -Message "$($_.Exception.Message); partial bundle left in $outPath" -Category WriteError)
+    }
+
+    $report.Add("bundle: $indexPath")
+    return [pscustomobject]@{
+        ExitCode = 0
+        Out = $outPath
+        IndexPath = $indexPath
+        Changed = $changedCount
+        Denied = $deniedCount
+        Report = $report.ToArray()
+    }
+}
+
 Export-ModuleMember -Function @(
     'Invoke-Git'
     'Search-Worktree'
@@ -5173,4 +5664,5 @@ Export-ModuleMember -Function @(
     'New-TicketWorktree'
     'Update-Ledger'
     'Export-ReviewFindings'
+    'ReviewBundle'
 )

@@ -616,3 +616,254 @@ function Test-ExportReviewFindingsListsEveryKeptFinding
         Remove-TempDir $dir
     }
 }
+
+function Get-TestTreeSnapshot
+{
+    # HEAD, status, the index bytes and the SHA-256 of every file outside .git. The index is read first, and every git
+    # call runs with GIT_OPTIONAL_LOCKS=0, so taking the snapshot cannot itself rewrite the index.
+    param([Parameter(Mandatory)][string]$Repo)
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('index ' + [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.IO.File]::ReadAllBytes((Join-Path $Repo '.git\index')))))
+    Use-TestEnvironment -Variables @{ GIT_OPTIONAL_LOCKS = '0' } -ScriptBlock {
+        $lines.Add('head ' + (Get-TestRevision $Repo))
+        foreach ($entry in @(Get-TestStatus $Repo))
+        {
+            $lines.Add("status $entry")
+        }
+    }
+
+    $gitDirectory = Join-Path $Repo '.git'
+    foreach ($file in @(Get-ChildItem -LiteralPath $Repo -Recurse -File -Force | Where-Object { -not $_.FullName.StartsWith($gitDirectory, [System.StringComparison]::OrdinalIgnoreCase) } | Sort-Object FullName))
+    {
+        $lines.Add("file $($file.FullName.Substring($Repo.Length)) " + [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.IO.File]::ReadAllBytes($file.FullName))))
+    }
+
+    return , $lines.ToArray()
+}
+
+function Get-TestDirectorySnapshot
+{
+    # Names and hashes of every file under Path, or '<missing>'.
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path))
+    {
+        return , [string[]]@('<missing>')
+    }
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf)
+    {
+        return , [string[]]@('file ' + [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.IO.File]::ReadAllBytes($Path))))
+    }
+
+    return , [string[]]@(Get-ChildItem -LiteralPath $Path -Recurse -Force | Sort-Object FullName | ForEach-Object {
+            if ($_.PSIsContainer) { "dir $($_.Name)" } else { "file $($_.Name) " + [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.IO.File]::ReadAllBytes($_.FullName))) }
+        })
+}
+
+function Get-TestBundleEnvironment
+{
+    # The test identity, IPE_CONFIG cleared, and core.autocrlf=false through GIT_CONFIG_* (never git config), so the
+    # committed blobs keep the fixture's bytes whatever the machine's global autocrlf is.
+    return (Get-TestGitIdentity) + @{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'core.autocrlf'; GIT_CONFIG_VALUE_0 = 'false'; IPE_CONFIG = $null }
+}
+
+function Test-ReviewBundleWritesEveryPartAndLeavesTheTreeUntouched
+{
+    Import-IpeForTest
+    $repo = New-TempRepo
+    $configDir = New-TempDir
+    $outParent = New-TempDir
+    try
+    {
+        $config = New-WorkflowConfig -Directory $configDir
+        $out = Join-Path $outParent 'bundle'
+        Use-TestEnvironment -Variables (Get-TestBundleEnvironment) -ScriptBlock {
+            Write-TestBytes -Path (Join-Path $repo 'src\a.cs') -Text "class A`r`n{`r`n}`r`n" -Bom
+            New-TempCommit -Repo $repo -Message 'base'
+            Invoke-TestGit -Repo $repo -Arguments @('checkout', '-q', '-b', 'feature') | Out-Null
+            Write-TestBytes -Path (Join-Path $repo 'src\a.cs') -Text "class A`r`n{`r`n}`r`n"
+            New-TempCommit -Repo $repo -Message 'feat: drop the bom'
+            Write-TestBytes -Path (Join-Path $repo 'docs\b.md') -Text "caf$([char]0xE9)`r`nline two`nline three`r`n"
+            New-TempCommit -Repo $repo -Message 'docs: add b'
+            Write-TestBytes -Path (Join-Path $repo '.vs\x.json') -Text "{}`n"
+            Write-TestBytes -Path (Join-Path $repo 'docs\HANDOFF.md') -Text "# handoff`n"
+            New-TempCommit -Repo $repo -Message 'chore: add denied files'
+            $mergeBase = Get-TestRevision $repo 'main'
+            $head = Get-TestRevision $repo
+            Write-TestBytes -Path (Join-Path $repo 'src\a.cs') -Text "class A`r`n{`r`n    int X;`r`n}`r`n"
+            Write-TestBytes -Path (Join-Path $repo '.ipe-logs\t-summary.txt') -Text "summary`n"
+            Write-TestBytes -Path (Join-Path $repo '.ipe-logs\last-full-check.json') -Text "{ `"result`": `"pass`", `"head`": `"$head`", `"dirtyPaths`": [] }`n"
+            Invoke-TestGit -Repo $repo -Arguments @('status') | Out-Null
+            $before = Get-TestTreeSnapshot $repo
+
+            $output = & $script:PwshPath -NoProfile -File $script:IpeEntryPath ReviewBundle -Worktree $repo -Base main -Out $out -ConfigPath $config 2>&1
+            $exit = $LASTEXITCODE
+            Assert-Equal $before (Get-TestTreeSnapshot $repo) ' (the tree changed)'
+            Assert-Equal 0 $exit " (output: $(($output | ForEach-Object { "$_" }) -join ' / '))"
+            $text = ($output | ForEach-Object { "$_" }) -join "`n"
+            Assert-Contains $text "bundle: $(Join-Path $out 'index.md')"
+
+            $log = [System.IO.File]::ReadAllText((Join-Path $out 'log.txt'))
+            foreach ($subject in @('feat: drop the bom', 'docs: add b', 'chore: add denied files'))
+            {
+                Assert-Contains $log $subject
+            }
+
+            Assert-NotContains $log '    base'
+            Assert-Contains ([System.IO.File]::ReadAllText((Join-Path $out 'diffstat.txt'))) 'src/a.cs'
+            $expectedPatch = Use-TestEnvironment -Variables @{ GIT_OPTIONAL_LOCKS = '0' } -ScriptBlock {
+                (Invoke-Git -Worktree $repo -Arguments @('-c', 'core.quotepath=false', 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '-M', $mergeBase, 'HEAD') -Bytes).Bytes
+            }
+            $patch = [System.IO.File]::ReadAllBytes((Join-Path $out 'diff.patch'))
+            Assert-True ($patch.Length -gt 0) 'diff.patch is empty'
+            Assert-True ([System.Linq.Enumerable]::SequenceEqual([byte[]]$expectedPatch, [byte[]]$patch)) 'diff.patch differs from git diff byte for byte'
+            Assert-Contains ([System.Text.Encoding]::UTF8.GetString($patch)) "+caf$([char]0xE9)`r"
+
+            $files = [System.IO.File]::ReadAllLines((Join-Path $out 'files.md'))
+            $aRow = @($files | Where-Object { $_.StartsWith('| src/a.cs |') })
+            Assert-Equal 1 $aRow.Count ' (rows for src/a.cs)'
+            Assert-Equal '| src/a.cs | M | BOM | no BOM | CRLF (3) | CRLF (3) | BOM removed |' $aRow[0]
+            $bRow = @($files | Where-Object { $_.StartsWith('| docs/b.md |') })
+            Assert-Equal '| docs/b.md | A | - | no BOM | - | mixed (CRLF 2, LF 1) | mixed |' $bRow[0]
+
+            $denied = [System.IO.File]::ReadAllText((Join-Path $out 'denied-paths.txt'))
+            Assert-Contains $denied ".vs/x.json: .vs/x.json has a '.vs' path segment"
+            Assert-Contains $denied 'docs/HANDOFF.md: docs/HANDOFF.md is named HANDOFF.md'
+            Assert-NotContains $denied 'src/a.cs'
+            Assert-Equal "src/a.cs`n" ([System.IO.File]::ReadAllText((Join-Path $out 'status.txt')))
+            foreach ($name in @('t-summary.txt', 'last-full-check.json'))
+            {
+                Assert-Equal ([System.IO.File]::ReadAllBytes((Join-Path $repo ".ipe-logs\$name"))) ([System.IO.File]::ReadAllBytes((Join-Path $out "full-check\$name")))
+            }
+
+            $index = [System.IO.File]::ReadAllText((Join-Path $out 'index.md'))
+            Assert-True ($index.StartsWith("# Review bundle review`n", [System.StringComparison]::Ordinal)) 'index.md does not start with the bundle title'
+            foreach ($name in @('log.txt', 'diffstat.txt', 'diff.patch', 'files.md', 'denied-paths.txt', 'status.txt', 'full-check/'))
+            {
+                Assert-Contains $index "| ``$name`` |"
+            }
+
+            Assert-Contains $index '| Line-ending flags | 2 (BOM added 0, BOM removed 1, mixed 1) |'
+            Assert-Contains $index '| Denied paths | 2 |'
+            Assert-Contains $index '| Full-check record | result pass, head equals HEAD, 0 dirty path(s) |'
+            foreach ($file in @(Get-ChildItem -LiteralPath $out -Recurse -File | Where-Object { $_.Name -ne 'diff.patch' -and $_.DirectoryName -eq $out }))
+            {
+                $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+                Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) "$($file.Name) has a BOM"
+                Assert-True (-not [System.Text.Encoding]::Latin1.GetString($bytes).Contains("`r`n")) "$($file.Name) has CRLF"
+            }
+        }
+    }
+    finally
+    {
+        Remove-TempDir $repo
+        Remove-TempDir $configDir
+        Remove-TempDir $outParent
+    }
+}
+
+function Test-ReviewBundleRerunsIntoAPreviousBundle
+{
+    Import-IpeForTest
+    $repo = New-TempRepo
+    try
+    {
+        $out = Join-Path $repo '.agents\bundle'
+        Use-TestEnvironment -Variables (Get-TestBundleEnvironment) -ScriptBlock {
+            Write-TestBytes -Path (Join-Path $repo '.gitignore') -Text ".agents/`n.ipe-logs/`n"
+            Write-TestBytes -Path (Join-Path $repo 'src\a.cs') -Text "class A`r`n{`r`n}`r`n"
+            New-TempCommit -Repo $repo -Message 'base'
+            $base = Get-TestRevision $repo
+            Write-TestBytes -Path (Join-Path $repo 'src\b.cs') -Text "class B`r`n{`r`n}`r`n"
+            New-TempCommit -Repo $repo -Message 'feat: first'
+            Write-TestBytes -Path (Join-Path $repo '.ipe-logs\old-summary.txt') -Text "old`n"
+            [void][System.IO.Directory]::CreateDirectory((Join-Path $repo '.agents'))
+
+            $first = ReviewBundle -Worktree $repo -Base $base -Out $out -Tag 'round-1'
+            Assert-Equal 0 $first.ExitCode
+            Assert-True (Test-Path -LiteralPath (Join-Path $out 'full-check\old-summary.txt')) 'the first bundle lacks the summary copy'
+            Assert-Equal "clean`n" ([System.IO.File]::ReadAllText((Join-Path $out 'status.txt')))
+
+            Remove-Item -LiteralPath (Join-Path $repo '.ipe-logs\old-summary.txt')
+            Write-TestBytes -Path (Join-Path $repo 'src\c.cs') -Text "class C`r`n{`r`n}`r`n"
+            New-TempCommit -Repo $repo -Message 'feat: second'
+            $second = ReviewBundle -Worktree $repo -Base $base -Out $out -Tag 'round-2'
+            Assert-Equal 0 $second.ExitCode
+            Assert-Contains ([System.IO.File]::ReadAllText((Join-Path $out 'log.txt'))) 'feat: second'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $out 'full-check'))) 'the stale full-check copies are still there'
+            Assert-True ([System.IO.File]::ReadAllText((Join-Path $out 'index.md')).StartsWith("# Review bundle round-2`n", [System.StringComparison]::Ordinal)) 'index.md was not rewritten'
+            Assert-Equal @('denied-paths.txt', 'diff.patch', 'diffstat.txt', 'files.md', 'index.md', 'log.txt', 'status.txt' | Sort-Object) @(Get-ChildItem -LiteralPath $out -Force | ForEach-Object { $_.Name } | Sort-Object)
+
+            $empty = ReviewBundle -Worktree $repo -Base 'HEAD' -Out $out
+            Assert-Equal 0 $empty.ExitCode
+            Assert-Equal "# Changed files ($((Get-TestRevision $repo).Substring(0, 12))..$((Get-TestRevision $repo).Substring(0, 12)))`n`nno changes`n" ([System.IO.File]::ReadAllText((Join-Path $out 'files.md')))
+            Assert-Equal "no commits`n" ([System.IO.File]::ReadAllText((Join-Path $out 'log.txt')))
+            Assert-Equal 0 ([System.IO.File]::ReadAllBytes((Join-Path $out 'diff.patch'))).Length
+        }
+    }
+    finally
+    {
+        Remove-TempDir $repo
+    }
+}
+
+function Test-ReviewBundleRefusesBadOutAndBase
+{
+    Import-IpeForTest
+    $repo = New-TempRepo
+    $parent = New-TempDir
+    try
+    {
+        Use-TestEnvironment -Variables (Get-TestBundleEnvironment) -ScriptBlock {
+            Write-TestBytes -Path (Join-Path $repo '.gitignore') -Text ".agents/`n"
+            Write-TestBytes -Path (Join-Path $repo 'docs\readme.md') -Text "readme`n"
+            New-TempCommit -Repo $repo -Message 'base'
+            $base = Get-TestRevision $repo
+            Write-TestBytes -Path (Join-Path $repo 'docs\more.md') -Text "more`n"
+            New-TempCommit -Repo $repo -Message 'feat: more'
+
+            $foreign = Join-Path $parent 'foreign'
+            Write-TestBytes -Path (Join-Path $foreign 'notes.txt') -Text "mine`n"
+            $foreignWithIndex = Join-Path $parent 'foreign-index'
+            Write-TestBytes -Path (Join-Path $foreignWithIndex 'index.md') -Text "# Review bundle old`n"
+            Write-TestBytes -Path (Join-Path $foreignWithIndex 'notes.txt') -Text "mine`n"
+            $docs = Join-Path $parent 'docs'
+            Write-TestBytes -Path (Join-Path $docs 'index.md') -Text "# Docs`n"
+            $file = Join-Path $parent 'file.txt'
+            Write-TestBytes -Path $file -Text "file`n"
+            $cases = @(
+                @{ Out = $foreign; Like = '*holds files that are not a review bundle: notes.txt; pass a new or empty directory' }
+                @{ Out = $foreignWithIndex; Like = '*holds files that are not a review bundle: notes.txt;*' }
+                @{ Out = $docs; Like = '*holds files that are not a review bundle: index.md;*' }
+                @{ Out = $file; Like = '*is a file' }
+                @{ Out = $repo; Like = '*is inside * and not ignored; it would change the tree' }
+                @{ Out = (Join-Path $repo '.git'); Like = '*is inside the git directory*' }
+                @{ Out = (Join-Path $repo '.git\bundle'); Like = '*is inside the git directory*' }
+                @{ Out = (Join-Path $repo 'docs\bundle'); Like = '*is inside * and not ignored*' }
+            )
+            $tree = Get-TestTreeSnapshot $repo
+            foreach ($case in $cases)
+            {
+                $outBefore = Get-TestDirectorySnapshot $case.Out
+                Assert-Throws { ReviewBundle -Worktree $repo -Base $base -Out $case.Out } -ErrorId 'Ipe.BadArguments' -MessageLike $case.Like | Out-Null
+                if ($case.Out -ine $repo)
+                {
+                    Assert-Equal $outBefore (Get-TestDirectorySnapshot $case.Out) " (-Out $($case.Out) changed)"
+                }
+            }
+
+            $fresh = Join-Path $parent 'fresh'
+            Assert-Throws { ReviewBundle -Worktree $repo -Base 'no-such-ref' -Out $fresh } -ErrorId 'Ipe.BadArguments' -MessageLike "-Base 'no-such-ref' is not a commit in *" | Out-Null
+            Assert-Throws { ReviewBundle -Worktree $repo -Base '--all' -Out $fresh } -ErrorId 'Ipe.BadArguments' -MessageLike "-Base '--all' is not a commit in *" | Out-Null
+            Assert-True (-not (Test-Path -LiteralPath $fresh)) 'a refused run created -Out'
+            Assert-Equal $tree (Get-TestTreeSnapshot $repo) ' (the tree changed)'
+        }
+    }
+    finally
+    {
+        Remove-TempDir $repo
+        Remove-TempDir $parent
+    }
+}

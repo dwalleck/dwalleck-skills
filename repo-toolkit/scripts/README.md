@@ -169,6 +169,17 @@ Every command also takes `-ConfigPath`.
 | `New-TicketWorktree -RepoRoot -Id -Branch -Base [-Path] [-LedgerPath] [-LedgerKey]` | Runs `git worktree add -b`, maps a drive, and records the ledger row. |
 | `Update-Ledger -LedgerPath -Ticket [-State] [-Worktree] [-SourceHead] [-Workflow -WorkflowRole] [-Note \| -AppendNote]` | Edits one row of the `\| # \| State ...` table and keeps every other byte. Accepts only workflow ids that match `wf_<16 hex>`. |
 | `Export-ReviewFindings -RunDir -Out [-IncludeDropped]` | Writes every kept finding of a code-review run (`verified.json`) to Markdown, with no cap, and adds the failure scenario from `findings.json`. |
+| `ReviewBundle -Worktree -Base -Out [-Tag]` | Writes a reviewer's evidence into `-Out` and never changes the tree: `log.txt` (`git log --format=fuller` of base..HEAD), `diffstat.txt` and a byte-exact `diff.patch` (merge-base..HEAD), `files.md` (each changed file's BOM and line endings before and after, flagged `BOM added`, `BOM removed` or `mixed`), `denied-paths.txt` (changed paths Commit-Change would refuse; `.vs` is always denied), `status.txt` (uncommitted paths, listed, not diffed), `full-check\` (copies of `<LogDir>\*-summary.txt` and `last-full-check.json`) and `index.md` (first line `# Review bundle <Tag>`). Only read-only git runs, with `GIT_OPTIONAL_LOCKS=0`. Exit 0 when the bundle is written (flags and denied paths are findings, not failures), 1 on an error. Runs without a config (LogDir `.ipe-logs`, deny segment `.vs`). Line endings are those of the committed blobs; under `core.autocrlf=true` they are normally LF, so BOM changes are the main finding there. |
+
+`ReviewBundle -Out` rules, all checked before anything is deleted or written:
+
+- `-Out` may be missing (it is created), an empty directory, or a previous bundle (an `index.md` whose first line starts
+  with `# Review bundle `, plus only the bundle's own files). A previous bundle's files are replaced, and a stale
+  `full-check\` goes with them. Anything else, or a file, is refused.
+- `-Out` equal to the tree root, or at or under the git directory, is refused.
+- `-Out` inside the tree must be ignored: `git check-ignore -q` must exit 0. This fails closed: a missing `-Out` that only
+  a directory pattern (`bundle/`) would match is refused, while a missing child of an existing ignored directory
+  (`.agents/x` under `.agents/`) is accepted.
 
 ## Mutation records
 
