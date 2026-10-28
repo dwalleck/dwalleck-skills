@@ -26,7 +26,9 @@ substituted). Tokens can come in any order.
 - **`--comment`**: after the output, post the findings as inline GitHub PR
   comments.
 - **`--max-findings n|all`**: the output cap — a positive integer, or `all` for
-  no cap. Default: the level's cap in the matrix. An invalid value → the level's
+  no cap. Default: `all` when the target is a branch, or when the extra
+  instructions say this is an implement-spec ticket, cross-ticket or final
+  review; otherwise the level's cap in the matrix. An invalid value → that
   default, with a note.
 - **`--verify precision|recall|max`**: override the level's verify policy. It
   applies at medium, high, and max. At minimal and low there is no verify step,
@@ -44,6 +46,9 @@ substituted). Tokens can come in any order.
 | medium | 3+5 angles → 1-vote verify | A, B, C + reuse, simplification, efficiency, altitude, conventions (8) | up to 6 | precision | no | 8 |
 | high | 3+5 angles → 1-vote verify (recall-biased) | same 8 | up to 6 | recall | no | 10 |
 | max | 5+5 angles → 1-vote verify → sweep | A, B, C, D, E + the same 5 (10) | up to 8 | max | yes, up to 8 more | 15 |
+
+Default cap applies to diff, path and PR targets; branch targets and
+implement-spec reviews default to `all` (see Arguments).
 
 Level intro line (give it to every finder):
 
@@ -91,14 +96,18 @@ when no workflow can run.
    2. **Sub-agent route** — only if `run_workflow` is not available but
       `invoke_sub_agent` is. Follow "Sub-agent route" below.
    3. **In-context** — neither tool is available. Read
-      `references/fallback-inline.md` and follow it.
+      `references/fallback-inline.md` and follow it; it has you read
+      `references/inline-bundle.md`, which holds every other reference file
+      the route needs.
 
    `subagent` is only the tools-config and permissions name of the sub-agent
    capability; the tool you call is `invoke_sub_agent`. In Kiro CLI with
    Workflows enabled, the main chat often has only `run_workflow`; that is
    expected, not an error.
 4. **Output**: read `references/output.md` and follow it. On the workflow
-   route, the workflow's report step writes the output for you (W5).
+   route, the workflow's report step writes the output for you (W5). On the
+   in-context route, follow the bundle's `references/output.md` section,
+   which you have already read.
 5. **`--comment`**: after the output is printed, read
    `references/github-comment.md` and follow it.
 

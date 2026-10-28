@@ -9,7 +9,8 @@ that file verbatim.
 
 ### Cap and ranking
 
-Apply the cap first. If more than the cap survive, keep the cap's number of most
+Apply the cap in effect (`--max-findings`, else the default in SKILL.md
+Arguments) first. If more than the cap survive, keep the cap's number of most
 severe; with `all`, keep every finding that survives — there is no maximum.
 Correctness bugs always outrank cleanup and altitude findings when the cap
 forces a cut.

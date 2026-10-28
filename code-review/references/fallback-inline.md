@@ -18,30 +18,36 @@ has no sub-agent vote; keep votes that did come back), Phase 3 if only the
 sweep failed. The disclosure still applies, limited to the phases you ran in
 context (for example, "verification was self-checked, not independent").
 
+Read `references/inline-bundle.md` once, in full (it holds finder-rules,
+dedup, verify, gap-sweep, output and every angle). On this route it replaces
+the separate reference files: each `references/<file>` below names a section
+of it.
+
 ### Phase 1 — Find candidates (single pass)
 
 Work through the level's angles (8 at medium and high, 10 at max) yourself, in
-sequence, in this same context — do not spawn sub-agents. For each angle, read
-its file from the matrix in SKILL.md and apply it under the rules in
-`references/finder-rules.md`, up to the level's candidate cap.
+sequence, in this same context — do not spawn sub-agents. For each angle in
+the SKILL.md matrix, take its `references/angles/<key>.md` section and apply
+it under the `references/finder-rules.md` section, up to the level's
+candidate cap.
 
 ### Phase 2 — Dedup and self-check (no sub-agent verify)
 
-Dedup by the rule in `references/dedup.md`. Re-check each remaining candidate yourself
+Dedup by the rule in the `references/dedup.md` section. Re-check each remaining candidate yourself
 against the diff before keeping it: vote it CONFIRMED, PLAUSIBLE, or REFUTED by
-the definitions in `references/verify.md`, and keep or drop it by the verify policy in
+the definitions in the `references/verify.md` section, and keep or drop it by the verify policy in
 effect (precision, recall, or max). Record the vote as the verdict, marked
 `(self-check)`.
 
 ### Phase 3 — Sweep for gaps (max only)
 
 Take one more pass yourself (same context, no sub-agent) as a fresh reviewer
-who has the deduplicated list. Follow `references/gap-sweep.md`, but run its prompt
+who has the deduplicated list. Follow the `references/gap-sweep.md` section, but run its prompt
 yourself instead of handing it to a sub-agent.
 
 ### Disclosure
 
-State in the output's run line what actually ran (see `references/output.md`).
+State in the output's run line what actually ran (see the `references/output.md` section).
 For a full fallback: `route: in-context` and `verification: self-checked in
 context — not independent` — the angles ran in sequence in one context and
 each candidate was self-checked, so no independent verification ran. For a

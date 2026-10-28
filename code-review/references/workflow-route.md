@@ -165,7 +165,7 @@ run_workflow(
 | `level_intro` | the level's intro line from the SKILL.md matrix section, verbatim, joined into one line with single spaces (keep the `**` markup) |
 | `verify_policy` | `precision`, `recall`, or `max`, after any `--verify` override |
 | `candidate_cap` | `6` (medium, high) or `8` (max) |
-| `findings_cap` | the cap after any `--max-findings`: a positive integer, or `all` |
+| `findings_cap` | the cap after any `--max-findings`: a positive integer, or `all` (default: SKILL.md Arguments) |
 
 If `run_workflow` fails because it does not know `code-review-worker` or
 `code-review-verifier`, the agents were installed after this session loaded
