@@ -1,0 +1,20 @@
+[
+  {
+    "file": "src/Contoso.Api/Controllers/OrderController.cs",
+    "line": 41,
+    "short_summary": "Cancellation is reported as a failure",
+    "summary": "A cancelled request is logged as a failed order lookup.",
+    "failure_scenario": "The caller disconnects during the lookup and the log shows OrderLookupFailed for an aborted request.",
+    "category": "correctness",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "src/Contoso.Domain/Services/PricingService.cs",
+    "line": 77,
+    "short_summary": "Rounding differs from the spec",
+    "summary": "Prices are rounded half-to-even instead of half-up.",
+    "failure_scenario": "A price of 2.345 becomes 2.34 instead of 2.35.",
+    "category": "correctness",
+    "verdict": "PLAUSIBLE"
+  }
+]

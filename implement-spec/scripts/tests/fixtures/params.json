@@ -1,0 +1,6 @@
+{
+  "level": "high",
+  "findings_cap": "10",
+  "target_kind": "branch",
+  "target_label": "integration/contoso-demo @ 1234abcd vs main"
+}

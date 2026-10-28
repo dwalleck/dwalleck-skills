@@ -1,0 +1,9 @@
+src/Contoso/Orders.cs(20,9): error CS1002: ; expected [src/Contoso/Contoso.csproj]
+
+Build FAILED.
+
+src/Contoso/Orders.cs(20,9): error CS1002: ; expected [src/Contoso/Contoso.csproj]
+    0 Warning(s)
+    1 Error(s)
+
+Time Elapsed 00:00:02.10

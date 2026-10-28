@@ -1,0 +1,27 @@
+{
+  "mode": "sub-agents",
+  "policy": "recall",
+  "missing_angles": [],
+  "pooled": 18,
+  "deduplicated": 14,
+  "by_sub_agents": 14,
+  "by_verify_step": 0,
+  "kept": [
+    { "id": "K01", "file": "src/Contoso.Api/Controllers/OrderController.cs", "line": 41, "summary": "Cancellation is reported as a failed lookup.", "category": "correctness", "verdict": "CONFIRMED", "evidence": "OrderController catches OperationCanceledException without checking the token." },
+    { "id": "K02", "file": "src/Contoso.Domain/Services/PricingService.cs", "line": 77, "summary": "Rounding differs from the spec.", "failure_scenario": "Own scenario: 2.345 is billed as 2.34.", "category": "correctness", "angles": ["a-line-scan", "spec"], "verdict": "PLAUSIBLE", "evidence": "Math.Round uses MidpointRounding.ToEven by default." },
+    { "id": "K03", "file": "src/Contoso.Domain/Services/PricingService.cs", "line": 90, "summary": "Discount is applied twice.", "failure_scenario": "A 10% code yields 19% off.", "category": "correctness", "verdict": "CONFIRMED", "evidence": "ApplyDiscount is called in Quote and in Checkout." },
+    { "id": "K04", "file": "src/Contoso.Api/Startup.cs", "line": 12, "summary": "Health endpoint is not behind the gate.", "failure_scenario": "The endpoint answers while the flag is off.", "category": "security", "verdict": "PLAUSIBLE", "evidence": "MapHealthChecks is registered before UseGate." },
+    { "id": "K05", "file": "src/Contoso.Data/OrderRepository.cs", "line": 33, "summary": "Query reads every row.", "failure_scenario": "A large tenant times out.", "category": "performance", "verdict": "CONFIRMED", "evidence": "ToListAsync runs before Where." },
+    { "id": "K06", "file": "src/Contoso.Data/OrderRepository.cs", "line": 58, "summary": "DbException is swallowed.", "failure_scenario": "A failed insert reports success.", "category": "correctness", "verdict": "CONFIRMED", "evidence": "catch (DbException) { return true; }" },
+    { "id": "K07", "file": "src/Contoso.Api/Validators/OrderValidator.cs", "line": 19, "summary": "Quantity zero is accepted.", "failure_scenario": "An order with quantity 0 is stored.", "category": "correctness", "verdict": "CONFIRMED", "evidence": "GreaterThanOrEqualTo(0) instead of GreaterThan(0)." },
+    { "id": "K08", "file": "src/Contoso.Api/Validators/OrderValidator.cs", "line": 27, "summary": "Name length is not limited.", "failure_scenario": "A 5000 character name fails at the database.", "category": "correctness", "verdict": "PLAUSIBLE", "evidence": "No MaximumLength rule." },
+    { "id": "K09", "file": "tests/Contoso.Tests/OrderTests.cs", "line": 64, "summary": "Assertion never runs.", "failure_scenario": "A broken lookup still passes the test.", "category": "tests", "verdict": "CONFIRMED", "evidence": "The assertion is inside a callback that is never invoked." },
+    { "id": "K10", "file": "tests/Contoso.Tests/PricingTests.cs", "line": 15, "summary": "Culture-dependent parsing.", "failure_scenario": "The test fails under de-DE.", "category": "tests", "verdict": "PLAUSIBLE", "evidence": "decimal.Parse without a culture." },
+    { "id": "K11", "file": "src/Contoso.Domain/Clients/ShippingClient.cs", "line": 102, "summary": "HttpClient created per call.", "failure_scenario": "Socket exhaustion under load.", "category": "reliability", "verdict": "CONFIRMED", "evidence": "new HttpClient() inside GetRatesAsync." },
+    { "id": "K12", "file": "src/Contoso.Domain/Clients/ShippingClient.cs", "line": 120, "summary": "No timeout on the rates call.", "failure_scenario": "A stalled carrier hangs the request.", "category": "reliability", "verdict": "PLAUSIBLE", "evidence": "No Timeout set and no token passed." }
+  ],
+  "dropped": [
+    { "id": "D01", "file": "src/Contoso.Data/Entities/Order.cs", "line": 8, "summary": "Column name differs from the old schema.", "category": "correctness", "verdict": "REFUTED", "evidence": "The spec renames the column." },
+    { "id": "D02", "file": "src/Contoso.Api/Program.cs", "line": 3, "summary": "Top-level statements style.", "category": "style", "verdict": "REFUTED", "evidence": "The repo uses top-level statements everywhere." }
+  ]
+}

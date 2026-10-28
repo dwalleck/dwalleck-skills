@@ -1,0 +1,12 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+src/Contoso/Orders.cs(12,5): warning CS8618: Non-nullable property 'Name' must contain a non-null value. [src/Contoso/Contoso.csproj]
+  Contoso -> artifacts/Contoso.dll
+
+Build succeeded.
+
+src/Contoso/Orders.cs(12,5): warning CS8618: Non-nullable property 'Name' must contain a non-null value. [src/Contoso/Contoso.csproj]
+    1 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:04.21

@@ -1,0 +1,13 @@
+[1mContoso.Tests[0m starting
+skipped Pending_IsSkipped (0ms)
+  Skipped until the feature lands
+
+  In process file artifacts produced:
+    - artifacts/TestResults/Contoso.Tests-report.html
+
+Test run summary: [32;1mPassed![0m - artifacts/Contoso.Tests.dll (net10.0|x64)
+  total: 42
+  failed: 0
+  succeeded: 41
+  skipped: 1
+  duration: 3s 120ms

@@ -1,0 +1,8 @@
+Zero tests ran
+
+Test run summary: Zero tests ran - artifacts/Contoso.Tests.dll (net10.0|x64)
+  total: 0
+  failed: 0
+  succeeded: 0
+  skipped: 0
+  duration: 210ms

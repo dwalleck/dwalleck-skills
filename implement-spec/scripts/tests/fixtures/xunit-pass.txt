@@ -1,0 +1,4 @@
+Test run for artifacts/Contoso.Unit.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+
+[32;1mPassed![0m  - Failed:     0, Passed:   120, Skipped:     3, Total:   123, Duration: 2 s - Contoso.Unit.Tests.dll (net10.0)

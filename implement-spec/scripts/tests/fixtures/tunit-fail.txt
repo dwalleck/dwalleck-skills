@@ -1,0 +1,15 @@
+failed Create_RejectsEmptyName (12ms)
+  AssertionException: Expected to be false
+  but found true
+    at Contoso.Tests.Orders.OrderTests.Create_RejectsEmptyName()
+failed Total_RoundsToCents(1.005) (12ms)
+  AssertionException: Expected 1.01 but found 1.00
+skipped Pending_IsSkipped (0ms)
+  Skipped until the feature lands
+
+Test run summary: Failed! - artifacts/Contoso.Tests.dll (net10.0|x64)
+  total: 10
+  failed: 2
+  succeeded: 7
+  skipped: 1
+  duration: 1s 4ms

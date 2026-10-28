@@ -1,0 +1,9 @@
+Test run for artifacts/Contoso.Unit.Tests.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+  Failed Contoso.Unit.Tests.InvoiceTests.Total_IncludesTax [4 ms]
+  Error Message:
+   Assert.Equal() Failure: Values differ
+  Stack Trace:
+     at Contoso.Unit.Tests.InvoiceTests.Total_IncludesTax()
+
+Failed!  - Failed:     1, Passed:    99, Skipped:     0, Total:   100, Duration: 1 s - Contoso.Unit.Tests.dll (net10.0)
