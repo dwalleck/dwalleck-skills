@@ -400,7 +400,8 @@ function New-TestConfig
         [Parameter(Mandatory)][string]$Directory,
         [hashtable]$Overrides = @{},
         [hashtable]$SqlOverrides = @{},
-        [string[]]$Omit = @()
+        [string[]]$Omit = @(),
+        [string]$FileName = 'implement-spec.psd1'
     )
 
     $sql = [ordered]@{
@@ -443,7 +444,18 @@ function New-TestConfig
     }
 
     $lines = @('@{') + @($values.Keys | ForEach-Object { "    $_ = $($values[$_])" }) + @('}')
-    $path = Join-Path $Directory 'implement-spec.psd1'
+    $path = Join-Path $Directory $FileName
     [System.IO.File]::WriteAllText($path, ($lines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+    return $path
+}
+
+function New-TestOverlay
+{
+    # Writes the local overlay that sits beside BasePath (<stem>.local.psd1) and returns its path. Text is the whole
+    # PowerShell data-file literal.
+    param([Parameter(Mandatory)][string]$BasePath, [Parameter(Mandatory)][string]$Text)
+
+    $path = [System.IO.Path]::ChangeExtension($BasePath, '.local.psd1')
+    [System.IO.File]::WriteAllText($path, $Text + "`n", [System.Text.UTF8Encoding]::new($false))
     return $path
 }

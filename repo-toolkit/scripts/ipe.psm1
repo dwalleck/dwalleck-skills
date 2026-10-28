@@ -51,6 +51,17 @@ $script:TimeoutsSchema = [ordered]@{
     GitSeconds = 'int'; SubstSeconds = 'int'; SqlStartSeconds = 'int'; SqlProbeSeconds = 'int'; CleanupSeconds = 'int'
     FocusedSeconds = 'int'; MutationHangSeconds = 'int'
 }
+# Default config file names under <main repo root>\.kiro, newest first; the second is the pre-repo-toolkit name.
+$script:ConfigFileNames = @('repo-toolkit.psd1', 'implement-spec.psd1')
+# A base config's local overlay is its sibling <stem>.local.psd1. It may set only these machine keys: a $null value
+# is a top-level key typed by $script:ConfigSchema, a schema is a section whose listed keys may be set.
+$script:OverlaySuffix = '.local.psd1'
+$script:OverlayKeys = [ordered]@{
+    UseSubst = $null
+    DrivePool = $null
+    Sql = [ordered]@{ ConnectionFile = $script:SqlSchema.ConnectionFile; Server = $script:SqlSchema.Server; StartCommand = $script:SqlSchema.StartCommand }
+    Timeouts = $script:TimeoutsSchema
+}
 
 # Private helpers ---------------------------------------------------------------------------------------------------
 
@@ -403,37 +414,142 @@ function Assert-IpeConfigSection
     }
 }
 
+function Assert-IpeOverlay
+{
+    # A local overlay may set only machine values: the keys in $script:OverlayKeys, each with its base schema type.
+    param([Parameter(Mandatory)][hashtable]$Overlay, [Parameter(Mandatory)][string]$OverlayPath)
+
+    foreach ($key in $Overlay.Keys)
+    {
+        if (-not $script:OverlayKeys.Contains($key))
+        {
+            throw (New-IpeOverlayKeyError -OverlayPath $OverlayPath -Key $key)
+        }
+
+        $value = $Overlay[$key]
+        $sectionSchema = $script:OverlayKeys[$key]
+        if ($null -eq $sectionSchema)
+        {
+            Assert-IpeOverlayValue -OverlayPath $OverlayPath -Key $key -Value $value -Type $script:ConfigSchema[$key]
+            continue
+        }
+
+        if ($value -isnot [hashtable])
+        {
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config overlay ${OverlayPath}: key '$key' must be table" -Category InvalidData)
+        }
+
+        foreach ($innerKey in $value.Keys)
+        {
+            if (-not $sectionSchema.Contains($innerKey))
+            {
+                throw (New-IpeOverlayKeyError -OverlayPath $OverlayPath -Key "$key.$innerKey")
+            }
+
+            Assert-IpeOverlayValue -OverlayPath $OverlayPath -Key "$key.$innerKey" -Value $value[$innerKey] -Type $sectionSchema[$innerKey]
+        }
+    }
+}
+
+function New-IpeOverlayKeyError
+{
+    param([Parameter(Mandatory)][string]$OverlayPath, [Parameter(Mandatory)][string]$Key)
+
+    $allowed = 'UseSubst, DrivePool, Sql.ConnectionFile, Sql.Server, Sql.StartCommand, Timeouts.*'
+    return (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config overlay ${OverlayPath}: key '$Key' may not be set in a local overlay (allowed: $allowed)" -Category InvalidData)
+}
+
+function Assert-IpeOverlayValue
+{
+    param([Parameter(Mandatory)][string]$OverlayPath, [Parameter(Mandatory)][string]$Key, [object]$Value, [Parameter(Mandatory)][string]$Type)
+
+    if (-not (Test-IpeConfigValue -Value $Value -Type $Type))
+    {
+        $expected = $Type.TrimEnd('?').Replace('+', ' (non-empty)')
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config overlay ${OverlayPath}: key '$Key' must be $expected" -Category InvalidData)
+    }
+}
+
+function Merge-IpeOverlay
+{
+    # Top-level overlay keys replace the base value; Sql and Timeouts merge per key, but only over a base section that
+    # is a table, so the base validation still reports a missing or malformed section by its own key.
+    param([Parameter(Mandatory)][hashtable]$Base, [Parameter(Mandatory)][hashtable]$Overlay)
+
+    $merged = @{} + $Base
+    foreach ($key in $Overlay.Keys)
+    {
+        if ($null -eq $script:OverlayKeys[$key])
+        {
+            $merged[$key] = $Overlay[$key]
+            continue
+        }
+
+        if ($merged.ContainsKey($key) -and $merged[$key] -is [hashtable])
+        {
+            $section = @{} + $merged[$key]
+            foreach ($innerKey in $Overlay[$key].Keys)
+            {
+                $section[$innerKey] = $Overlay[$key][$innerKey]
+            }
+
+            $merged[$key] = $section
+        }
+    }
+
+    return $merged
+}
+
 function Import-IpeConfig
 {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$ConfigPath)
 
     Assert-IpeAbsolutePath -Path $ConfigPath -Name 'ConfigPath'
+    if ($ConfigPath.EndsWith($script:OverlaySuffix, [System.StringComparison]::OrdinalIgnoreCase))
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config $ConfigPath is a local overlay; pass the base config" -Category InvalidArgument)
+    }
+
     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf))
     {
         throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigNotFound' -Message "config file not found: $ConfigPath" -Category ObjectNotFound)
     }
 
     $data = Import-PowerShellDataFile -LiteralPath $ConfigPath
-    Assert-IpeConfigSection -Table $data -Schema $script:ConfigSchema -Prefix '' -ConfigPath $ConfigPath
+    $label = $ConfigPath
+    $overlayPath = Get-IpeNormalPath ([System.IO.Path]::ChangeExtension($ConfigPath, $script:OverlaySuffix))
+    if (Test-Path -LiteralPath $overlayPath -PathType Leaf)
+    {
+        $overlay = Import-PowerShellDataFile -LiteralPath $overlayPath
+        Assert-IpeOverlay -Overlay $overlay -OverlayPath $overlayPath
+        $data = Merge-IpeOverlay -Base $data -Overlay $overlay
+        $label = "$ConfigPath (with overlay $overlayPath)"
+    }
+    else
+    {
+        $overlayPath = $null
+    }
+
+    Assert-IpeConfigSection -Table $data -Schema $script:ConfigSchema -Prefix '' -ConfigPath $label
     if ($data.SchemaVersion -ne 1)
     {
-        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'SchemaVersion' must be 1, found $($data.SchemaVersion)" -Category InvalidData)
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'SchemaVersion' must be 1, found $($data.SchemaVersion)" -Category InvalidData)
     }
 
     $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $index = 0
     foreach ($project in @($data.TestProjects))
     {
-        Assert-IpeConfigSection -Table $project -Schema $script:TestProjectSchema -Prefix "TestProjects[$index]." -ConfigPath $ConfigPath
+        Assert-IpeConfigSection -Table $project -Schema $script:TestProjectSchema -Prefix "TestProjects[$index]." -ConfigPath $label
         if ($project.Kind -notin @('xunit', 'tunit'))
         {
-            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'TestProjects[$index].Kind' must be 'xunit' or 'tunit', found '$($project.Kind)'" -Category InvalidData)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'TestProjects[$index].Kind' must be 'xunit' or 'tunit', found '$($project.Kind)'" -Category InvalidData)
         }
 
         if (-not $names.Add($project.Name))
         {
-            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'TestProjects[$index].Name' duplicates '$($project.Name)'" -Category InvalidData)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'TestProjects[$index].Name' duplicates '$($project.Name)'" -Category InvalidData)
         }
 
         $index++
@@ -443,14 +559,14 @@ function Import-IpeConfig
     {
         if ($letter -notmatch '^[A-Za-z]$')
         {
-            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'DrivePool' entries must be single letters, found '$letter'" -Category InvalidData)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'DrivePool' entries must be single letters, found '$letter'" -Category InvalidData)
         }
     }
 
-    Assert-IpeConfigSection -Table $data.Sql -Schema $script:SqlSchema -Prefix 'Sql.' -ConfigPath $ConfigPath
+    Assert-IpeConfigSection -Table $data.Sql -Schema $script:SqlSchema -Prefix 'Sql.' -ConfigPath $label
     if ($data.Sql.Server -notmatch '^[^,]+,\d+$')
     {
-        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'Sql.Server' must be 'host,port', found '$($data.Sql.Server)'" -Category InvalidData)
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'Sql.Server' must be 'host,port', found '$($data.Sql.Server)'" -Category InvalidData)
     }
 
     try
@@ -459,19 +575,19 @@ function Import-IpeConfig
     }
     catch [System.ArgumentException]
     {
-        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'Sql.LeakedDatabasePattern' is not a valid regex" -Category InvalidData)
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'Sql.LeakedDatabasePattern' is not a valid regex" -Category InvalidData)
     }
 
     $index = 0
     foreach ($exclusion in @($data.FormatExclusions))
     {
-        Assert-IpeConfigSection -Table $exclusion -Schema $script:FormatExclusionSchema -Prefix "FormatExclusions[$index]." -ConfigPath $ConfigPath
+        Assert-IpeConfigSection -Table $exclusion -Schema $script:FormatExclusionSchema -Prefix "FormatExclusions[$index]." -ConfigPath $label
         $index++
     }
 
-    Assert-IpeConfigSection -Table $data.Warnings -Schema $script:WarningsSchema -Prefix 'Warnings.' -ConfigPath $ConfigPath
-    Assert-IpeConfigSection -Table $data.Commit -Schema $script:CommitSchema -Prefix 'Commit.' -ConfigPath $ConfigPath
-    Assert-IpeConfigSection -Table $data.Timeouts -Schema $script:TimeoutsSchema -Prefix 'Timeouts.' -ConfigPath $ConfigPath
+    Assert-IpeConfigSection -Table $data.Warnings -Schema $script:WarningsSchema -Prefix 'Warnings.' -ConfigPath $label
+    Assert-IpeConfigSection -Table $data.Commit -Schema $script:CommitSchema -Prefix 'Commit.' -ConfigPath $label
+    Assert-IpeConfigSection -Table $data.Timeouts -Schema $script:TimeoutsSchema -Prefix 'Timeouts.' -ConfigPath $label
 
     $extraChecks = [System.Collections.Generic.List[hashtable]]::new()
     $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -479,16 +595,16 @@ function Import-IpeConfig
     $declaredChecks = if ($data.ContainsKey('ExtraChecks')) { @($data.ExtraChecks) } else { @() }
     foreach ($check in $declaredChecks)
     {
-        Assert-IpeConfigSection -Table $check -Schema $script:ExtraCheckSchema -Prefix "ExtraChecks[$index]." -ConfigPath $ConfigPath
+        Assert-IpeConfigSection -Table $check -Schema $script:ExtraCheckSchema -Prefix "ExtraChecks[$index]." -ConfigPath $label
         if (-not $names.Add($check.Name))
         {
-            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'ExtraChecks[$index].Name' duplicates '$($check.Name)'" -Category InvalidData)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'ExtraChecks[$index].Name' duplicates '$($check.Name)'" -Category InvalidData)
         }
 
         $timeout = if ($check.ContainsKey('TimeoutSeconds')) { $check.TimeoutSeconds } else { $script:DefaultExtraCheckSeconds }
         if ($timeout -lt 1)
         {
-            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${ConfigPath}: key 'ExtraChecks[$index].TimeoutSeconds' must be at least 1, found $timeout" -Category InvalidData)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigInvalid' -Message "config ${label}: key 'ExtraChecks[$index].TimeoutSeconds' must be at least 1, found $timeout" -Category InvalidData)
         }
 
         $extraChecks.Add(@{ Name = $check.Name; Script = $check.Script; TimeoutSeconds = $timeout })
@@ -515,6 +631,7 @@ function Import-IpeConfig
     $config.Sql = $sql
     $config.ConfigPath = Get-IpeNormalPath $ConfigPath
     $config.ConfigDirectory = $configDirectory
+    $config.OverlayPath = $overlayPath
     return $config
 }
 
@@ -551,16 +668,22 @@ function Resolve-IpeConfig
         return Import-IpeConfig -ConfigPath $env:IPE_CONFIG
     }
 
-    $candidate = $null
+    $candidates = @()
     if ($Worktree)
     {
         $root = Get-IpeMainRepoRoot -Worktree $Worktree
         if ($root)
         {
-            $candidate = Join-Path $root '.kiro' 'implement-spec.psd1'
-            if (Test-Path -LiteralPath $candidate -PathType Leaf)
+            $candidates = @($script:ConfigFileNames | ForEach-Object { Join-Path $root '.kiro' $_ })
+            $found = @($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            if ($found.Count -gt 1)
             {
-                return Import-IpeConfig -ConfigPath $candidate
+                throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigAmbiguous' -Message "both $($found[0]) and $($found[1]) exist; delete one" -Category InvalidData)
+            }
+
+            if ($found.Count -eq 1)
+            {
+                return Import-IpeConfig -ConfigPath $found[0]
             }
         }
     }
@@ -570,8 +693,8 @@ function Resolve-IpeConfig
         return $null
     }
 
-    $looked = if ($candidate) { " (looked for $candidate)" } else { '' }
-    throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigNotFound' -Message "no config: pass -ConfigPath, set IPE_CONFIG, or create <main repo root>\.kiro\implement-spec.psd1$looked" -Category ObjectNotFound)
+    $looked = if ($candidates.Count -gt 0) { " (looked for $($candidates -join ' and '))" } else { '' }
+    throw (New-IpeErrorRecord -ErrorId 'Ipe.ConfigNotFound' -Message "no config: pass -ConfigPath, set IPE_CONFIG, or create <main repo root>\.kiro\repo-toolkit.psd1 (or the older <main repo root>\.kiro\implement-spec.psd1)$looked" -Category ObjectNotFound)
 }
 
 function ConvertFrom-IpeBytes

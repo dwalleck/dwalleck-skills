@@ -391,6 +391,162 @@ function Test-ConfigResolvesFromMainCheckoutOfAWorktree
     }
 }
 
+function Test-ConfigOverlayMergesMachineValuesPerKey
+{
+    Import-IpeForTest
+    $dir = New-TempDir
+    try
+    {
+        $base = New-TestConfig -Directory $dir
+        $plain = Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base)
+        Assert-Equal $null $plain.OverlayPath
+        Assert-Equal $true $plain.UseSubst
+        $overlay = New-TestOverlay -BasePath $base -Text "@{ UseSubst = `$false; DrivePool = @('q'); Sql = @{ Server = '127.0.0.1,2' }; Timeouts = @{ BuildSeconds = 7 } }"
+        $config = Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base)
+        Assert-Equal $false $config.UseSubst
+        Assert-Equal @('Q') $config.DrivePool
+        Assert-Equal '127.0.0.1,2' $config.Sql.Server
+        Assert-Equal 'IPE_SELFTEST_SQL' $config.Sql.EnvVar
+        Assert-Equal @('pwsh', '-NoProfile', '-Command', 'exit 0') $config.Sql.StartCommand
+        Assert-Equal (Join-Path $dir 'connection.txt') $config.Sql.ConnectionFile
+        Assert-Equal 7 $config.Timeouts.BuildSeconds
+        Assert-Equal 60 $config.Timeouts.GitSeconds
+        Assert-True ($config.OverlayPath -ieq $overlay) "OverlayPath $($config.OverlayPath), expected $overlay"
+        Assert-True ($config.ConfigPath -ieq $base) "ConfigPath $($config.ConfigPath), expected $base"
+        [void](New-TestOverlay -BasePath $base -Text "@{ Sql = @{ ConnectionFile = 'machine\other.txt' } }")
+        $relative = Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base)
+        Assert-Equal (Join-Path $dir 'machine\other.txt') $relative.Sql.ConnectionFile
+        Assert-Equal '127.0.0.1,1' $relative.Sql.Server
+        [void](New-TestOverlay -BasePath $base -Text '@{}')
+        $empty = Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base)
+        Assert-Equal $true $empty.UseSubst
+        Assert-Equal @('Z') $empty.DrivePool
+    }
+    finally
+    {
+        Remove-TempDir $dir
+    }
+}
+
+function Test-ConfigOverlayRejectsRepoAndUnknownKeys
+{
+    Import-IpeForTest
+    $dir = New-TempDir
+    try
+    {
+        $base = New-TestConfig -Directory $dir
+        $cases = [ordered]@{
+            'Solution' = "@{ Solution = 'src\Other.sln' }"
+            'TestProjects' = '@{ TestProjects = @() }'
+            'Sql.EnvVar' = "@{ Sql = @{ EnvVar = 'OTHER' } }"
+            'Sql.LeakedDatabasePattern' = "@{ Sql = @{ LeakedDatabasePattern = '^x$' } }"
+            'Timeouts.Bogus' = '@{ Timeouts = @{ Bogus = 1 } }'
+            'Bogus' = '@{ Bogus = 1 }'
+            'UseSubst' = "@{ UseSubst = 'yes' }"
+            'Sql' = "@{ Sql = 'x' }"
+            'Timeouts.BuildSeconds' = "@{ Timeouts = @{ BuildSeconds = 'x' } }"
+        }
+        foreach ($name in $cases.Keys)
+        {
+            [void](New-TestOverlay -BasePath $base -Text $cases[$name])
+            Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base) } -ErrorId 'Ipe.ConfigInvalid' -MessageLike "config overlay *key '$name'*" | Out-Null
+        }
+
+        [void](New-TestOverlay -BasePath $base -Text "@{ Solution = 'src\Other.sln' }")
+        Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base) } -ErrorId 'Ipe.ConfigInvalid' -MessageLike "*may not be set in a local overlay (allowed: UseSubst, DrivePool, Sql.ConnectionFile, Sql.Server, Sql.StartCommand, Timeouts.``*)" | Out-Null
+        [void](New-TestOverlay -BasePath $base -Text "@{ DrivePool = @('QQ') }")
+        Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base) } -ErrorId 'Ipe.ConfigInvalid' -MessageLike "*(with overlay *): key 'DrivePool' entries must be single letters*" | Out-Null
+    }
+    finally
+    {
+        Remove-TempDir $dir
+    }
+}
+
+function Test-ConfigOverlayAppliesThroughConfigPathAndEnvVar
+{
+    Import-IpeForTest
+    $dir = New-TempDir
+    try
+    {
+        $base = New-TestConfig -Directory $dir -FileName 'custom.psd1'
+        $overlay = New-TestOverlay -BasePath $base -Text '@{ UseSubst = $false }'
+        Assert-Equal (Join-Path $dir 'custom.local.psd1') $overlay
+        Use-TestEnvironment -Variables @{ IPE_CONFIG = $null } -ScriptBlock {
+            $viaPath = Invoke-IpePrivate -ScriptBlock { param($p) Resolve-IpeConfig -ConfigPath $p } -ArgumentList @($base)
+            Assert-Equal $false $viaPath.UseSubst
+            Assert-True ($viaPath.OverlayPath -ieq $overlay) "OverlayPath $($viaPath.OverlayPath)"
+        }
+
+        Use-TestEnvironment -Variables @{ IPE_CONFIG = $base } -ScriptBlock {
+            $viaEnv = Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w } -ArgumentList @($dir)
+            Assert-Equal $false $viaEnv.UseSubst
+            Assert-True ($viaEnv.OverlayPath -ieq $overlay) "OverlayPath $($viaEnv.OverlayPath)"
+        }
+
+        Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($overlay) } -ErrorId 'Ipe.ConfigInvalid' -MessageLike '*is a local overlay; pass the base config*' | Out-Null
+    }
+    finally
+    {
+        Remove-TempDir $dir
+    }
+}
+
+function Test-ConfigResolvesNewNameFirstAndRefusesBothNames
+{
+    Import-IpeForTest
+    $repo = New-TempRepo
+    $worktree = "$repo-wt"
+    try
+    {
+        Write-TestBytes -Path (Join-Path $repo 'readme.md') -Text "x`n"
+        New-TempCommit -Repo $repo -Message 'base'
+        $kiro = Join-Path $repo '.kiro'
+        [void][System.IO.Directory]::CreateDirectory($kiro)
+        $new = New-TestConfig -Directory $kiro -FileName 'repo-toolkit.psd1'
+        Invoke-TestGit -Repo $repo -Arguments @('worktree', 'add', '-q', '-b', 'feature', $worktree) | Out-Null
+        Use-TestEnvironment -Variables @{ IPE_CONFIG = $null } -ScriptBlock {
+            $config = Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w } -ArgumentList @($worktree)
+            Assert-True ($config.ConfigPath -ieq $new) "resolved $($config.ConfigPath), expected $new"
+            Assert-Equal $null $config.OverlayPath
+            $overlay = New-TestOverlay -BasePath $new -Text '@{ UseSubst = $false }'
+            $overlaid = Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w } -ArgumentList @($worktree)
+            Assert-Equal $false $overlaid.UseSubst
+            Assert-True ($overlaid.OverlayPath -ieq $overlay) "OverlayPath $($overlaid.OverlayPath), expected $overlay"
+            $old = New-TestConfig -Directory $kiro
+            Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w } -ArgumentList @($worktree) } -ErrorId 'Ipe.ConfigAmbiguous' -MessageLike '*repo-toolkit.psd1*implement-spec.psd1*delete one*' | Out-Null
+            Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w -Optional } -ArgumentList @($worktree) } -ErrorId 'Ipe.ConfigAmbiguous' | Out-Null
+            Remove-Item -LiteralPath $new, $old, $overlay
+            Assert-Equal $null (Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w -Optional } -ArgumentList @($worktree))
+            Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($w) Resolve-IpeConfig -Worktree $w } -ArgumentList @($worktree) } -ErrorId 'Ipe.ConfigNotFound' -MessageLike '*repo-toolkit.psd1*implement-spec.psd1*' | Out-Null
+        }
+    }
+    finally
+    {
+        Remove-TempDir $worktree
+        Remove-TempDir $repo
+    }
+}
+
+function Test-ConfigOverlayOverMalformedBaseSectionReportsTheBaseKey
+{
+    Import-IpeForTest
+    $dir = New-TempDir
+    try
+    {
+        $base = New-TestConfig -Directory $dir -Omit @('Sql')
+        [void](New-TestOverlay -BasePath $base -Text "@{ Sql = @{ Server = '127.0.0.1,3' } }")
+        Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base) } -ErrorId 'Ipe.ConfigInvalid' -MessageLike "*(with overlay *): missing key 'Sql'*" | Out-Null
+        $base = New-TestConfig -Directory $dir -Overrides @{ Timeouts = "'x'" }
+        [void](New-TestOverlay -BasePath $base -Text '@{ Timeouts = @{ BuildSeconds = 5 } }')
+        Assert-Throws { Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($base) } -ErrorId 'Ipe.ConfigInvalid' -MessageLike "*(with overlay *): key 'Timeouts' must be table*" | Out-Null
+    }
+    finally
+    {
+        Remove-TempDir $dir
+    }
+}
+
 function Test-DispatchSplitsCommaListsAndCoercesTypes
 {
     Import-IpeForTest

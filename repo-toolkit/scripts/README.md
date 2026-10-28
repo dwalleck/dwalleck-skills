@@ -44,14 +44,49 @@ Commands look for the config in this order:
 
 1. `-ConfigPath <abs>`.
 2. `$env:IPE_CONFIG`.
-3. `<main repo root>\.kiro\implement-spec.psd1`. The main repo root is the parent of
-   `git rev-parse --git-common-dir` for `-Worktree`, so a worktree finds the main checkout's config even when the
-   config is not committed.
+3. `<main repo root>\.kiro\repo-toolkit.psd1`, then the older name `<main repo root>\.kiro\implement-spec.psd1`. The
+   main repo root is the parent of `git rev-parse --git-common-dir` for `-Worktree`, so a worktree finds the main
+   checkout's config even when the config is not committed. If both names exist, the command fails with
+   `Ipe.ConfigAmbiguous` ("both ... exist; delete one"), also for the commands that run without a config
+   (Test-LineEndings, ReviewBundle). `-ConfigPath` and `IPE_CONFIG` skip this lookup.
 
 The config is validated when it is loaded. A missing key, a wrong type or an unknown key throws an error that names
 the key. Relative paths resolve against the targeted tree. `Sql.ConnectionFile` goes through environment-variable
 expansion, and a relative `ConnectionFile` resolves against the config's directory. The file's contents are never
 printed or logged.
+
+### Local overlay
+
+Machine values (a deep clone that needs subst, another SQL port, slower timeouts) go in a **local overlay** beside the
+base file instead of in the committed config. The overlay is the base file's sibling `<stem>.local.psd1`
+(`repo-toolkit.local.psd1` beside `repo-toolkit.psd1`, `implement-spec.local.psd1` beside `implement-spec.psd1`,
+`foo.local.psd1` beside a `-ConfigPath foo.psd1`), for all three lookup routes. It is optional; without one the base
+applies as it is. Add `.kiro/*.local.psd1` to the repo's `.gitignore`: the overlay belongs to one machine.
+
+| Overlay key | Type | Merge |
+|---|---|---|
+| `UseSubst` | bool | replaces the base value |
+| `DrivePool` | string[] (non-empty), single letters | replaces the whole list |
+| `Sql.ConnectionFile` | string (a relative path resolves against the config's directory) | per key |
+| `Sql.Server` | string `host,port` | per key |
+| `Sql.StartCommand` | string[] (non-empty) | per key (the whole array) |
+| `Timeouts.<any Timeouts key>` | int (`TunitInner` string) | per key |
+
+Any other key, including `Sql.EnvVar`, `Sql.LeakedDatabasePattern` and every repo key (`Solution`, `TestProjects`,
+`Commit` ...), throws `Ipe.ConfigInvalid` naming the key and the allowed list, and so does a value of the wrong type.
+`Sql` and `Timeouts` merge per key over the base section; the other base keys keep their values. The merged config is
+then validated like the base alone, and error messages name `<base> (with overlay <overlay>)`. Passing an overlay
+itself as the config (a path ending in `.local.psd1`) throws `Ipe.ConfigInvalid` ("... is a local overlay; pass the
+base config").
+
+Example: a repo's committed config has `UseSubst = $false` for a clone at `C:\src\tp`. A clone at a deep path adds
+`.kiro\implement-spec.local.psd1` (or `.kiro\repo-toolkit.local.psd1` beside the new name) containing:
+
+```powershell
+@{ UseSubst = $true; DrivePool = @('W', 'X') }
+```
+
+### Base config
 
 ```powershell
 @{
