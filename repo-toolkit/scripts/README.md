@@ -12,7 +12,7 @@ in the repo's config file. The module names no repo and no machine.
 ## Requirements
 
 - PowerShell 7.2 or later (`pwsh`).
-- git.
+- git 2.38 or later (Merge-Ticket -FastForwardOnly uses rebase --no-update-refs).
 - The .NET SDK the repo builds with. `Remove-LeakedTestDatabases` runs `cleanup-test-databases.cs` as a file-based
   app (`dotnet run --file`), so it needs .NET 10 or later.
 - Windows for `Use-Drive` (subst) and `Stop-TestHosts`. On other systems Use-Drive returns the tree unchanged, and
@@ -36,7 +36,7 @@ pwsh -NoProfile -File .kiro\skills\repo-toolkit\scripts\ipe.ps1 help
 | 0 | pass |
 | 1 | fail, or an error (the message is on stderr) |
 | 2 | drive conflict (`Ipe.DriveConflict`): the requested letter maps another tree or is a real drive |
-| 3 | merge conflict (`Ipe.MergeConflict`): the merge is left in progress for the merger to resolve |
+| 3 | merge conflict (`Ipe.MergeConflict`, merge left in progress for the merger to resolve) or rebase conflict (`Ipe.RebaseConflict`, rebase aborted, branches unchanged) |
 
 ## Config
 
@@ -165,6 +165,7 @@ Every command also takes `-ConfigPath`.
 |---|---|
 | `Commit-Change -Worktree -Id -Paths (-Message \| -MessageFile) [-Base]` | The first line must be `<type>(<Id>): ...`. Refuses denied names, segments and LogDir paths. The staged set must equal `-Paths`. Runs Test-LineEndings and then `git commit -F`. |
 | `Merge-Ticket -Integration -Source -Id (-Feature \| -SpecDir) [-Continue] [-Drive]` | Runs `merge --no-ff --no-commit`. A conflict exits 3, leaves the merge in progress, and resumes with `-Continue`. A tree-equal merge with a passing full-check record skips the checks. Otherwise it runs the full check and the mutations whose files the merge changed. It commits on a pass and runs `merge --abort` on a failure. |
+| `Merge-Ticket -Integration -Source -Id (-Feature \| -SpecDir) -FastForwardOnly [-Drive]` | Keeps history linear: rebases the source branch onto the integration tip (`git rebase --no-autostash --no-autosquash --no-update-refs <tip sha>` in `-Source`), verifies the rebased HEAD in the source tree, then runs `merge --ff-only <sha>` in `-Integration`. No merge commit, no push. Both trees must be clean worktrees of one repository, `-Integration` on its branch, and no merge or rebase in progress. A rebase conflict runs `git rebase --abort`, checks both branches are back where they were, and exits 3 naming the conflicting files; resolve by rebasing by hand in `-Source`, run the full check, and rerun. A branch with merge commits that would need a rebase is refused (exit 1; a rebase would drop them). Verification follows the full-check record rule below, for the rebased HEAD: a covering record needs only Test-LineEndings; otherwise Invoke-FullCheck (tag `ff-<Id>`) runs, then the mutations whose files the rebase brought in. On a failure the integration branch is untouched, the source branch stays rebased, and the report names the original sha (`RebasedFrom`; `$null` when no rebase ran). A rebase timeout is aborted through the same check (covered by the abort helper's self-test, not by a provoked timeout); a rebase that stops without a conflict is classified `Ipe.GitFailed` (unit-tested only). `-Continue` is rejected. |
 | `Resolve-Ticket -Worktree -TicketFile -Id -CommentFile [-Status] [-NoCommit]` | Sets the status line, ticks the checkboxes, appends the comment under `## Comments`, and commits only that file. |
 | `New-TicketWorktree -RepoRoot -Id -Branch -Base [-Path] [-LedgerPath] [-LedgerKey]` | Runs `git worktree add -b`, maps a drive, and records the ledger row. |
 | `Update-Ledger -LedgerPath -Ticket [-State] [-Worktree] [-SourceHead] [-Workflow -WorkflowRole] [-Note \| -AppendNote]` | Edits one row of the `\| # \| State ...` table and keeps every other byte. Accepts only workflow ids that match `wf_<16 hex>`. |
@@ -251,7 +252,8 @@ to each record.
 }
 ```
 
-Merge-Ticket accepts the record only when `result` is `pass`, `head` equals the source HEAD and `dirtyPaths` is empty.
+Merge-Ticket accepts the record only when `result` is `pass`, `head` equals the source HEAD (the rebased HEAD under
+`-FastForwardOnly`) and `dirtyPaths` is empty.
 An implementer's handoff points to this record instead of restating the results.
 
 ## Self-tests

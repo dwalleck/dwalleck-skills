@@ -398,6 +398,301 @@ function Test-MergeTicketConflictExitsThreeAndContinueCommits
     }
 }
 
+function Get-TestFastForwardEnvironment
+{
+    # Rebases create commits: the test identity, and commit.gpgsign=false through GIT_CONFIG_* (never git config).
+    return (Get-TestGitIdentity) + @{ GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'commit.gpgsign'; GIT_CONFIG_VALUE_0 = 'false'; IPE_CONFIG = $null }
+}
+
+function Invoke-TestFastForward
+{
+    param([Parameter(Mandatory)][hashtable]$Fixture)
+
+    return Use-TestEnvironment -Variables (Get-TestFastForwardEnvironment) -ScriptBlock {
+        Merge-Ticket -Integration $Fixture.Repo -Source $Fixture.Source -Id '01' -Feature demo -FastForwardOnly -ConfigPath $Fixture.Config
+    }
+}
+
+function Get-TestShortSha
+{
+    param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Revision)
+
+    return [string](Invoke-TestGit -Repo $Repo -Arguments @('rev-parse', '--short', $Revision))
+}
+
+function Get-TestBranch
+{
+    param([Parameter(Mandatory)][string]$Repo)
+
+    return [string](Invoke-TestGit -Repo $Repo -Arguments @('symbolic-ref', '--short', 'HEAD'))
+}
+
+function Get-TestRebaseInProgress
+{
+    param([Parameter(Mandatory)][string]$Repo)
+
+    foreach ($name in @('rebase-merge', 'rebase-apply'))
+    {
+        if (Test-Path -LiteralPath ([string](Invoke-TestGit -Repo $Repo -Arguments @('rev-parse', '--path-format=absolute', '--git-path', $name))))
+        {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-MergeTicketFastForwardRebasesChecksAndFastForwards
+{
+    Import-IpeForTest
+    Install-MergeSeams
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture -IntegrationMoves
+        $state = New-MergeState
+        [void](Write-ImplementerRecord -Fixture $fixture -Head $fixture.SourceHead)
+        $result = Invoke-TestFastForward -Fixture $fixture
+        Assert-Equal 0 $result.ExitCode
+        $newHead = Get-TestRevision $fixture.Source
+        Assert-True ($newHead -ne $fixture.SourceHead) 'the source branch was not rebased'
+        Assert-Equal 1 $state.Checks.Count ' (full check calls; a record for the original head does not cover the rebased one)'
+        Assert-True ($state.Checks[0].Worktree -ieq $fixture.Source) "the check ran in $($state.Checks[0].Worktree), not the source tree"
+        Assert-Equal $fixture.PreTip $state.Checks[0].Base
+        Assert-Equal 'ff-01' $state.Checks[0].Tag
+        Assert-Equal 1 $state.Mutations.Count ' (mutation runs)'
+        Assert-Equal @('m-other') $state.Mutations[0].Only
+        Assert-Equal 'ff-01-mutations' $state.Mutations[0].Tag
+        Assert-Equal $newHead (Get-TestRevision $fixture.Repo)
+        Assert-Equal $newHead $result.Commit
+        Assert-Equal $fixture.PreTip (Get-TestRevision $fixture.Repo 'HEAD^')
+        Assert-Equal 2 @(([string](Invoke-TestGit -Repo $fixture.Repo -Arguments @('rev-list', '--parents', '-n', '1', 'HEAD'))).Split(' ')).Count ' (HEAD has more than one parent)'
+        Assert-Equal $fixture.SourceHead $result.RebasedFrom
+        Assert-Equal 'ticket/01' (Get-TestBranch $fixture.Source)
+        Assert-Equal 'main' (Get-TestBranch $fixture.Repo)
+        $origShort = Get-TestShortSha $fixture.Repo $fixture.SourceHead
+        $preShort = Get-TestShortSha $fixture.Repo $fixture.PreTip
+        $newShort = Get-TestShortSha $fixture.Repo $newHead
+        Assert-Contains $result.Report "rebased ticket/01 from $origShort onto ${preShort}: now $newShort"
+        Assert-Contains $result.Report "fast-forwarded main from $preShort to $newShort"
+        Assert-True (@($result.Report | Where-Object { $_ -like 'merge: pass (full check of * passed (tag ff-01); mutations m-other as expected)' }).Count -eq 1) 'the pass line is missing'
+        Assert-Equal @() (Get-TestStatus $fixture.Repo)
+        Assert-Equal @('?? .ipe-logs/last-full-check.json') (Get-TestStatus $fixture.Source)
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
+function Test-MergeTicketFastForwardWithCoveringRecordSkipsTheCheck
+{
+    Import-IpeForTest
+    Install-MergeSeams
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture
+        $state = New-MergeState
+        [void](Write-ImplementerRecord -Fixture $fixture -Head $fixture.SourceHead)
+        $result = Invoke-TestFastForward -Fixture $fixture
+        Assert-Equal 0 $result.ExitCode
+        Assert-Equal 0 $state.Checks.Count ' (full check calls)'
+        Assert-Equal 0 $state.Mutations.Count ' (mutation runs)'
+        Assert-Equal $fixture.SourceHead (Get-TestRevision $fixture.Repo)
+        Assert-Equal $fixture.SourceHead (Get-TestRevision $fixture.Source)
+        Assert-Equal $fixture.SourceHead $result.Commit
+        Assert-Equal $null $result.RebasedFrom
+        Assert-Contains $result.Report "already on top of $(Get-TestShortSha $fixture.Repo $fixture.PreTip): ticket/01 at $(Get-TestShortSha $fixture.Repo $fixture.SourceHead), no rebase"
+        Assert-Contains $result.Report 'line endings: pass'
+        Assert-True (@($result.Report | Where-Object { $_ -like 'merge: pass (verified by the implementer at *' }).Count -eq 1) 'the pass line is missing'
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
+function Test-MergeTicketFastForwardRebaseConflictExitsThreeAndTouchesNothing
+{
+    Import-IpeForTest
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture -Conflict
+        $output = Use-TestEnvironment -Variables (Get-TestFastForwardEnvironment) -ScriptBlock {
+            & $script:PwshPath -NoProfile -File $script:IpeEntryPath Merge-Ticket -Integration $fixture.Repo -Source $fixture.Source -Id 01 -Feature demo -FastForwardOnly -ConfigPath $fixture.Config 2>&1
+        }
+        Assert-Equal 3 $LASTEXITCODE
+        $text = ($output | ForEach-Object { "$_" }) -join "`n"
+        Assert-Contains $text 'conflicted in: src/Calc.cs'
+        Assert-Contains $text 'rebase aborted, both branches unchanged'
+        Assert-Contains $text "git rebase $($fixture.PreTip)"
+        Assert-Equal $fixture.SourceHead (Get-TestRevision $fixture.Source)
+        Assert-Equal 'ticket/01' (Get-TestBranch $fixture.Source)
+        Assert-Equal $false (Get-TestRebaseInProgress $fixture.Source)
+        Assert-Equal $fixture.PreTip (Get-TestRevision $fixture.Repo)
+        Assert-Equal 'main' (Get-TestBranch $fixture.Repo)
+        Assert-Equal @() (Get-TestStatus $fixture.Repo)
+        Assert-Equal @() (Get-TestStatus $fixture.Source)
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
+function Test-MergeTicketFastForwardRefusesWhenTheCheckFails
+{
+    Import-IpeForTest
+    Install-MergeSeams
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture -IntegrationMoves
+        $state = New-MergeState -CheckExit 1
+        $result = Invoke-TestFastForward -Fixture $fixture
+        Assert-Equal 1 $result.ExitCode
+        Assert-Equal 1 $state.Checks.Count ' (full check calls)'
+        Assert-Equal 0 $state.Mutations.Count ' (mutation runs)'
+        Assert-Equal $null $result.Commit
+        Assert-Equal $fixture.PreTip (Get-TestRevision $fixture.Repo)
+        Assert-Equal $fixture.PreTip (Get-TestRevision $fixture.Source 'HEAD^')
+        Assert-Equal $fixture.SourceHead $result.RebasedFrom
+        Assert-Equal 'ticket/01' (Get-TestBranch $fixture.Source)
+        $origShort = Get-TestShortSha $fixture.Repo $fixture.SourceHead
+        Assert-True (@($result.Report | Where-Object { $_ -like "main untouched at *; ticket/01 stays rebased at * (it was $origShort before the rebase: git reset --hard $($fixture.SourceHead) in *" }).Count -eq 1) 'the kept rebase and the original sha are not reported'
+        Assert-True (@($result.Report | Where-Object { $_ -like 'merge: FAIL (full check of * against * failed)' }).Count -eq 1) 'the failure is not reported'
+        Assert-Equal @() (Get-TestStatus $fixture.Repo)
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
+function Test-MergeTicketFastForwardRejectsContinue
+{
+    Import-IpeForTest
+    $dir = New-TempDir
+    try
+    {
+        Assert-Throws { Merge-Ticket -Integration $dir -Source $dir -Id '01' -Feature demo -FastForwardOnly -Continue } -ErrorId 'Ipe.BadArguments' -MessageLike '-FastForwardOnly takes no -Continue*' | Out-Null
+    }
+    finally
+    {
+        Remove-TempDir $dir
+    }
+}
+
+function Test-MergeTicketFastForwardRefusesMergeCommitsThatNeedARebase
+{
+    Import-IpeForTest
+    Install-MergeSeams
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture -IntegrationMoves
+        $state = New-MergeState
+        Use-TestEnvironment -Variables (Get-TestGitIdentity) -ScriptBlock {
+            Invoke-TestGit -Repo $fixture.Source -Arguments @('-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', 'main') | Out-Null
+        }
+
+        Write-TestBytes -Path (Join-Path $fixture.Repo 'src\Third.cs') -Text "class Third`r`n{`r`n}`r`n"
+        New-TempCommit -Repo $fixture.Repo -Message 'feat(00): add Third'
+        $sourceHead = Get-TestRevision $fixture.Source
+        $integrationHead = Get-TestRevision $fixture.Repo
+        Assert-Throws { Invoke-TestFastForward -Fixture $fixture } -ErrorId 'Ipe.BadArguments' -MessageLike '*ticket/01 contains 1 merge commit(s) since *; a rebase would drop them*' | Out-Null
+        Assert-Equal $sourceHead (Get-TestRevision $fixture.Source)
+        Assert-Equal 'ticket/01' (Get-TestBranch $fixture.Source)
+        Assert-Equal $integrationHead (Get-TestRevision $fixture.Repo)
+        Assert-Equal $false (Get-TestRebaseInProgress $fixture.Source)
+        Assert-Equal 0 $state.Checks.Count ' (full check calls)'
+        Assert-Equal 0 $state.Mutations.Count ' (mutation runs)'
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
+function Test-MergeTicketFastForwardNothingToMergeHasRebasedFrom
+{
+    Import-IpeForTest
+    Install-MergeSeams
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture
+        $state = New-MergeState
+        Invoke-TestGit -Repo $fixture.Source -Arguments @('reset', '-q', '--hard', $fixture.PreTip) | Out-Null
+        $result = Invoke-TestFastForward -Fixture $fixture
+        Assert-Equal 0 $result.ExitCode
+        Assert-Equal $null $result.RebasedFrom
+        Assert-Equal $null $result.Commit
+        Assert-True (@($result.Report | Where-Object { $_ -like 'nothing to merge: ticket/01 at * is already in main at *' }).Count -eq 1) 'nothing to merge is not reported'
+        Assert-Equal $fixture.PreTip (Get-TestRevision $fixture.Repo)
+        Assert-Equal 0 $state.Checks.Count ' (full check calls)'
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
+function Test-RebaseStopClassification
+{
+    Import-IpeForTest
+    $onto = 'a' * 40
+    $conflict = Invoke-IpePrivate -ScriptBlock {
+        param($sha)
+        New-IpeRebaseStopError -Branch 'ticket/01' -Onto $sha -OntoShort 'aaaaaaa' -Source '<source tree>' -Unmerged @('src/Calc.cs', 'src/Other.cs') -Output 'CONFLICT (content)'
+    } -ArgumentList @($onto)
+    Assert-Equal 'Ipe.RebaseConflict' $conflict.Exception.Data['IpeErrorId']
+    Assert-Contains $conflict.Exception.Message 'rebase of ticket/01 onto aaaaaaa conflicted in: src/Calc.cs, src/Other.cs; rebase aborted, both branches unchanged'
+    Assert-Contains $conflict.Exception.Message "In <source tree>, run ``git rebase $onto``"
+    $stopped = Invoke-IpePrivate -ScriptBlock {
+        param($sha)
+        New-IpeRebaseStopError -Branch 'ticket/01' -Onto $sha -OntoShort 'aaaaaaa' -Source '<source tree>' -Unmerged @() -Output 'error: The following untracked working tree files would be overwritten'
+    } -ArgumentList @($onto)
+    Assert-Equal 'Ipe.GitFailed' $stopped.Exception.Data['IpeErrorId']
+    Assert-Equal 'rebase of ticket/01 onto aaaaaaa stopped without a conflict: error: The following untracked working tree files would be overwritten; rebase aborted, both branches unchanged' $stopped.Exception.Message
+}
+
+function Test-RebaseAbortRecoveryRestoresBothBranches
+{
+    Import-IpeForTest
+    $fixture = $null
+    try
+    {
+        $fixture = New-MergeFixture -Conflict
+        Use-TestEnvironment -Variables (Get-TestFastForwardEnvironment) -ScriptBlock {
+            $rebase = Invoke-Git -Worktree $fixture.Source -Arguments @('rebase', $fixture.PreTip) -AllowExitCodes @(0, 1)
+            Assert-Equal 1 $rebase.ExitCode ' (the hand-started rebase did not stop)'
+        }
+
+        Assert-Equal $true (Get-TestRebaseInProgress $fixture.Source)
+        $config = Invoke-IpePrivate -ScriptBlock { param($p) Import-IpeConfig -ConfigPath $p } -ArgumentList @($fixture.Config)
+        $stop = {
+            param($source, $origHead, $integration, $preTip, $settings)
+            Stop-IpeRebase -Source $source -Branch 'ticket/01' -OrigHead $origHead -Integration $integration -PreTip $preTip -Config $settings
+        }
+        $line = Invoke-IpePrivate -ScriptBlock $stop -ArgumentList @($fixture.Source, $fixture.SourceHead, $fixture.Repo, $fixture.PreTip, $config)
+        Assert-Equal "rebase aborted; ticket/01 unchanged at $(Get-TestShortSha $fixture.Repo $fixture.SourceHead)" $line
+        Assert-Equal $fixture.SourceHead (Get-TestRevision $fixture.Source)
+        Assert-Equal 'ticket/01' (Get-TestBranch $fixture.Source)
+        Assert-Equal $false (Get-TestRebaseInProgress $fixture.Source)
+        Assert-Equal $fixture.PreTip (Get-TestRevision $fixture.Repo)
+        Assert-Equal @() (Get-TestStatus $fixture.Source)
+
+        Assert-Throws { Invoke-IpePrivate -ScriptBlock $stop -ArgumentList @($fixture.Source, $fixture.PreTip, $fixture.Repo, $fixture.PreTip, $config) } -ErrorId 'Ipe.RebaseAbortFailed' -MessageLike "*is on ticket/01 at $($fixture.SourceHead) (expected ticket/01 at $($fixture.PreTip))*" | Out-Null
+    }
+    finally
+    {
+        Remove-MergeFixture $fixture
+    }
+}
+
 function Test-ResolveTicketFlipsStatusTicksBoxesAppendsTheCommentAndCommitsOnlyTheTicket
 {
     Import-IpeForTest

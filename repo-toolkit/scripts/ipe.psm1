@@ -1268,7 +1268,7 @@ function Get-IpeHelp
 {
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add('usage: pwsh -NoProfile -File ipe.ps1 <Command> -Name value [-Switch] ...')
-    $lines.Add('comma lists are split for [string[]] parameters; exit 0 pass, 1 fail, 2 drive conflict, 3 merge conflict')
+    $lines.Add('comma lists are split for [string[]] parameters; exit 0 pass, 1 fail, 2 drive conflict, 3 merge conflict (merge left in progress) or rebase conflict (rebase aborted, branches unchanged)')
     $lines.Add('')
     foreach ($command in (Get-Command -Module $ExecutionContext.SessionState.Module.Name -CommandType Function | Sort-Object Name))
     {
@@ -4587,6 +4587,378 @@ function Commit-Change
     }
 }
 
+function Test-IpeRebaseInProgress
+{
+    param([Parameter(Mandatory)][string]$Worktree)
+
+    foreach ($name in @('rebase-merge', 'rebase-apply'))
+    {
+        $path = (Invoke-Git -Worktree $Worktree -Arguments @('rev-parse', '--path-format=absolute', '--git-path', $name)).Lines[0].Trim()
+        if (Test-Path -LiteralPath $path)
+        {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Stop-IpeRebase
+{
+    # Aborts a rebase in progress in Source (if any), then proves nothing moved: Source back on Branch at OrigHead with
+    # no rebase in progress, and Integration still at PreTip. Throws Ipe.RebaseAbortFailed with what it saw otherwise.
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Branch,
+        [Parameter(Mandatory)][string]$OrigHead,
+        [Parameter(Mandatory)][string]$Integration,
+        [Parameter(Mandatory)][string]$PreTip,
+        [Parameter(Mandatory)][hashtable]$Config,
+        [string]$Context = 'after the rebase stopped'
+    )
+
+    $aborted = $false
+    $abortError = $null
+    if (Test-IpeRebaseInProgress -Worktree $Source)
+    {
+        try
+        {
+            [void](Invoke-Git -Worktree $Source -Arguments @('rebase', '--abort') -TimeoutSeconds $Config.Timeouts.GitSeconds)
+            $aborted = $true
+        }
+        catch
+        {
+            $abortError = $_.Exception.Message
+        }
+    }
+
+    $sourceHead = Get-IpeHead -Worktree $Source
+    $branchResult = Invoke-Git -Worktree $Source -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD') -AllowExitCodes @(0, 1)
+    $sourceBranch = if ($branchResult.ExitCode -eq 0 -and $branchResult.Lines.Count -gt 0) { $branchResult.Lines[0].Trim() } else { '(detached HEAD)' }
+    $inProgress = Test-IpeRebaseInProgress -Worktree $Source
+    $integrationHead = Get-IpeHead -Worktree $Integration
+    if ($abortError -or $sourceHead -ne $OrigHead -or $sourceBranch -cne $Branch -or $inProgress -or $integrationHead -ne $PreTip)
+    {
+        $abortText = if ($abortError) { "git rebase --abort failed ($abortError); " } else { '' }
+        $message = "$abortText$Context, $Source is on $sourceBranch at $sourceHead (expected $Branch at $OrigHead), rebase in progress: $inProgress, " +
+            "and $Integration is at $integrationHead (expected $PreTip); restore both by hand"
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.RebaseAbortFailed' -Message $message -Category InvalidResult)
+    }
+
+    $unchanged = "$Branch unchanged at $(Get-IpeShortSha -Worktree $Source -Revision $OrigHead)"
+    return $(if ($aborted) { "rebase aborted; $unchanged" } else { $unchanged })
+}
+
+function New-IpeRebaseStopError
+{
+    # The error for a rebase that stopped and was aborted: a conflict (exit 3) when paths were unmerged, else a failure.
+    param(
+        [Parameter(Mandatory)][string]$Branch,
+        [Parameter(Mandatory)][string]$Onto,
+        [Parameter(Mandatory)][string]$OntoShort,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Unmerged,
+        [AllowEmptyString()][string]$Output = ''
+    )
+
+    if ($Unmerged.Count -gt 0)
+    {
+        $message = "rebase of $Branch onto $OntoShort conflicted in: $($Unmerged -join ', '); rebase aborted, both branches unchanged. " +
+            "In $Source, run ``git rebase $Onto``, resolve, run the full check, and rerun Merge-Ticket -FastForwardOnly"
+        return (New-IpeErrorRecord -ErrorId 'Ipe.RebaseConflict' -Message $message -Category ResourceExists)
+    }
+
+    return (New-IpeErrorRecord -ErrorId 'Ipe.GitFailed' -Message "rebase of $Branch onto $OntoShort stopped without a conflict: $Output; rebase aborted, both branches unchanged")
+}
+
+function Invoke-IpeFastForwardMerge
+{
+    # Merge-Ticket -FastForwardOnly. Rebases the source branch onto the integration tip, verifies the rebased HEAD in the
+    # source tree (the same full-check-record rule as a no-ff merge), then fast-forwards the integration branch to it. A
+    # rebase that stops is aborted and verified before the integration tree is touched; nothing is pushed or committed.
+    param(
+        [Parameter(Mandatory)][string]$Integration,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Branch,
+        [Parameter(Mandatory)][string]$Id,
+        [string]$Feature,
+        [string]$SpecDir,
+        [Parameter(Mandatory)][hashtable]$Config,
+        [string]$Drive
+    )
+
+    $gitSeconds = $Config.Timeouts.GitSeconds
+    $integrationBranchResult = Invoke-Git -Worktree $Integration -Arguments @('symbolic-ref', '--quiet', '--short', 'HEAD') -AllowExitCodes @(0, 1)
+    if ($integrationBranchResult.ExitCode -ne 0 -or $integrationBranchResult.Lines.Count -eq 0)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "-Integration $Integration has a detached HEAD; pass the tree where the integration branch is checked out" -Category InvalidArgument)
+    }
+
+    $integrationBranch = $integrationBranchResult.Lines[0].Trim()
+    $commonDirectories = foreach ($tree in @($Integration, $Source))
+    {
+        Get-IpeNormalPath (Invoke-Git -Worktree $tree -Arguments @('rev-parse', '--path-format=absolute', '--git-common-dir')).Lines[0].Trim()
+    }
+
+    if (-not (Test-IpeSamePath $commonDirectories[0] $commonDirectories[1]))
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "-Integration $Integration and -Source $Source are not worktrees of one repository" -Category InvalidArgument)
+    }
+
+    if (Get-IpeMergeHead -Worktree $Integration)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.MergeInProgress' -Message "a merge is in progress in $Integration; finish or abort it before Merge-Ticket -FastForwardOnly" -Category InvalidOperation)
+    }
+
+    if (Test-IpeRebaseInProgress -Worktree $Source)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.RebaseInProgress' -Message "a rebase is in progress in $Source; finish it (git rebase --continue) or abort it (git rebase --abort) first" -Category InvalidOperation)
+    }
+
+    foreach ($tree in @($Integration, $Source))
+    {
+        $dirty = Get-IpeDirtyPaths -Worktree $tree -Config $Config
+        if ($dirty.Count -gt 0)
+        {
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.DirtyTree' -Message "refusing to fast-forward with $($dirty.Count) changed path(s) in ${tree}: $($dirty -join ', ')" -Category InvalidOperation)
+        }
+    }
+
+    $preTip = Get-IpeHead -Worktree $Integration
+    $origHead = Get-IpeHead -Worktree $Source
+    $preShort = Get-IpeShortSha -Worktree $Integration -Revision $preTip
+    $origShort = Get-IpeShortSha -Worktree $Source -Revision $origHead
+    $merged = Invoke-Git -Worktree $Source -Arguments @('merge-base', '--is-ancestor', $origHead, $preTip) -AllowExitCodes @(0, 1)
+    if ($merged.ExitCode -eq 0)
+    {
+        return [pscustomobject]@{
+            ExitCode = 0; Commit = $null; RebasedFrom = $null; Verification = $null; SummaryPath = $null
+            Report = [string[]]@("nothing to merge: $Branch at $origShort is already in $integrationBranch at $preShort")
+        }
+    }
+
+    $report = [System.Collections.Generic.List[string]]::new()
+    $stopArguments = @{ Source = $Source; Branch = $Branch; OrigHead = $origHead; Integration = $Integration; PreTip = $preTip; Config = $Config }
+    $rebased = $false
+    $onTop = Invoke-Git -Worktree $Source -Arguments @('merge-base', '--is-ancestor', $preTip, $origHead) -AllowExitCodes @(0, 1)
+    if ($onTop.ExitCode -eq 0)
+    {
+        $report.Add("already on top of ${preShort}: $Branch at $origShort, no rebase")
+    }
+    else
+    {
+        $mergeCount = [int](Invoke-Git -Worktree $Source -Arguments @('rev-list', '--merges', '--count', "$preTip..$origHead")).Lines[0].Trim()
+        if ($mergeCount -gt 0)
+        {
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message "$Branch contains $mergeCount merge commit(s) since $preShort; a rebase would drop them. Rebase $Branch onto $preShort by hand, or use Merge-Ticket without -FastForwardOnly" -Category InvalidArgument)
+        }
+
+        # Onto the sha, not the branch name, so the target cannot move under the rebase.
+        try
+        {
+            $rebase = Invoke-Git -Worktree $Source -Arguments @('rebase', '--no-autostash', '--no-autosquash', '--no-update-refs', $preTip) -TimeoutSeconds $gitSeconds -AllowExitCodes @(0, 1, 128)
+        }
+        catch
+        {
+            if ((Get-IpeErrorId $_) -ne 'Ipe.GitTimeout')
+            {
+                throw
+            }
+
+            $timeout = $_.Exception.Message
+            [void](Stop-IpeRebase @stopArguments -Context 'after a rebase timeout')
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.GitTimeout' -Message "$timeout; rebase aborted, both branches unchanged" -Category OperationTimeout)
+        }
+
+        if ($rebase.ExitCode -ne 0)
+        {
+            $output = ("$($rebase.StdOut) $($rebase.StdErr)").Trim()
+            if (Test-IpeRebaseInProgress -Worktree $Source)
+            {
+                $unmerged = Get-IpeUnmergedPaths -Worktree $Source
+                [void](Stop-IpeRebase @stopArguments)
+                throw (New-IpeRebaseStopError -Branch $Branch -Onto $preTip -OntoShort $preShort -Source $Source -Unmerged $unmerged -Output $output)
+            }
+
+            [void](Stop-IpeRebase @stopArguments)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.GitFailed' -Message "git rebase $preShort exited $($rebase.ExitCode) in ${Source}: $output; both branches unchanged")
+        }
+
+        if (Test-IpeRebaseInProgress -Worktree $Source)
+        {
+            [void](Stop-IpeRebase @stopArguments)
+            throw (New-IpeErrorRecord -ErrorId 'Ipe.GitFailed' -Message "git rebase $preShort exited 0 but left a rebase in progress in $Source; rebase aborted, both branches unchanged")
+        }
+
+        $rebased = $true
+    }
+
+    $newHead = Get-IpeHead -Worktree $Source
+    $newShort = Get-IpeShortSha -Worktree $Source -Revision $newHead
+    if ($rebased)
+    {
+        $report.Add("rebased $Branch from $origShort onto ${preShort}: now $newShort")
+    }
+
+    if ($Feature)
+    {
+        $specDirectory = Join-IpeTreePath -Root $Source -Relative $Config.MutationSpecDir.Replace('{feature}', $Feature)
+    }
+    else
+    {
+        # The integration copy lacks the ticket's mutation records, so a spec dir inside it maps to the source tree.
+        $relative = ConvertTo-IpeRepoPath -Roots @($Integration) -Path $SpecDir
+        $specDirectory = if ($null -ne $relative) { Join-IpeTreePath -Root $Source -Relative $relative } else { $SpecDir }
+    }
+
+    $verification = Invoke-IpeFastForwardVerification -Source $Source -NewHead $newHead -OrigHead $origHead -PreTip $preTip -Id $Id -SpecDirectory $specDirectory -Config $Config -Drive $Drive
+    $report.AddRange([string[]]$verification.Report)
+    $rebasedFrom = if ($rebased) { $origHead } else { $null }
+    if (-not $verification.Passed)
+    {
+        $kept = if ($rebased) { "; $Branch stays rebased at $newShort (it was $origShort before the rebase: git reset --hard $origHead in $Source restores it)" } else { '' }
+        $report.Add("$integrationBranch untouched at $preShort$kept")
+        $report.Add("merge: FAIL ($($verification.Line))")
+        return [pscustomobject]@{ ExitCode = 1; Commit = $null; RebasedFrom = $rebasedFrom; Verification = $verification.Line; SummaryPath = $verification.SummaryPath; Report = $report.ToArray() }
+    }
+
+    $currentTip = Get-IpeHead -Worktree $Integration
+    if ($currentTip -ne $preTip)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.IntegrationMoved' -Message "$integrationBranch moved from $preShort to $(Get-IpeShortSha -Worktree $Integration -Revision $currentTip) during the check; nothing fast-forwarded. Rerun Merge-Ticket -FastForwardOnly" -Category InvalidOperation)
+    }
+
+    # The sha, not the branch, so a commit added to the source branch during the check is not taken.
+    $fastForward = Invoke-Git -Worktree $Integration -Arguments @('merge', '--ff-only', $newHead) -TimeoutSeconds $gitSeconds -AllowExitCodes @(0, 1, 128)
+    $afterTip = Get-IpeHead -Worktree $Integration
+    if ($fastForward.ExitCode -ne 0 -or $afterTip -ne $newHead)
+    {
+        $detail = ("$($fastForward.StdOut) $($fastForward.StdErr)").Trim()
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.GitFailed' -Message "git merge --ff-only $newShort exited $($fastForward.ExitCode) in ${Integration}, which is at ${afterTip}: $detail")
+    }
+
+    $report.Add("fast-forwarded $integrationBranch from $preShort to $newShort")
+    $report.Add("merge: pass ($($verification.Line))")
+    return [pscustomobject]@{ ExitCode = 0; Commit = $newHead; RebasedFrom = $rebasedFrom; Verification = $verification.Line; SummaryPath = $verification.SummaryPath; Report = $report.ToArray() }
+}
+
+function Invoke-IpeFastForwardVerification
+{
+    # Verifies the (rebased) source HEAD in the source tree. A passing, clean full-check record for exactly NewHead needs
+    # only the line-ending check; otherwise the full check runs, then the mutations whose files the rebase brought in.
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$NewHead,
+        [Parameter(Mandatory)][string]$OrigHead,
+        [Parameter(Mandatory)][string]$PreTip,
+        [Parameter(Mandatory)][string]$Id,
+        [Parameter(Mandatory)][string]$SpecDirectory,
+        [Parameter(Mandatory)][hashtable]$Config,
+        [string]$Drive
+    )
+
+    $report = [System.Collections.Generic.List[string]]::new()
+    $preShort = Get-IpeShortSha -Worktree $Source -Revision $PreTip
+    $newShort = Get-IpeShortSha -Worktree $Source -Revision $NewHead
+    $recordPath = Join-Path (Join-IpeTreePath -Root $Source -Relative $Config.LogDir) 'last-full-check.json'
+    $record = $null
+    $covered = $false
+    if (Test-Path -LiteralPath $recordPath -PathType Leaf)
+    {
+        try
+        {
+            $record = Read-IpeJsonFile -Path $recordPath -ErrorId 'Ipe.RecordInvalid'
+        }
+        catch
+        {
+            if ((Get-IpeErrorId $_) -ne 'Ipe.RecordInvalid')
+            {
+                throw
+            }
+
+            $report.Add("implementer record ${recordPath}: $($_.Exception.Message)")
+        }
+
+        if ($record)
+        {
+            $result = [string](Get-IpeJsonValue $record 'result')
+            $head = [string](Get-IpeJsonValue $record 'head')
+            $dirtyCount = @(@(Get-IpeJsonValue $record 'dirtyPaths') | Where-Object { $_ }).Count
+            $covered = $result -eq 'pass' -and $head -eq $NewHead -and $dirtyCount -eq 0
+            if (-not $covered)
+            {
+                $report.Add("implementer record $recordPath does not cover ${newShort}: result '$result', head '$head', $dirtyCount dirty path(s)")
+            }
+        }
+    }
+    else
+    {
+        $report.Add("no implementer record at $recordPath")
+    }
+
+    if ($covered)
+    {
+        $lineEndings = Test-LineEndings -Worktree $Source -Base $PreTip -ConfigPath $Config.ConfigPath
+        $report.AddRange([string[]]$lineEndings.Report)
+        return [pscustomobject]@{
+            Passed = ($lineEndings.ExitCode -eq 0)
+            Line = "verified by the implementer at $newShort (record $recordPath); line endings checked against $preShort"
+            SummaryPath = [string](Get-IpeJsonValue $record 'summaryPath')
+            Report = $report.ToArray()
+        }
+    }
+
+    $checkArguments = @{ Worktree = $Source; Base = $PreTip; Tag = "ff-$Id"; ConfigPath = $Config.ConfigPath }
+    if ($Drive)
+    {
+        $checkArguments.Drive = $Drive
+    }
+
+    $check = Invoke-FullCheck @checkArguments
+    $report.AddRange([string[]]$check.Report)
+    if ($check.ExitCode -ne 0)
+    {
+        return [pscustomobject]@{ Passed = $false; Line = "full check of $newShort against $preShort failed"; SummaryPath = $check.SummaryPath; Report = $report.ToArray() }
+    }
+
+    $changed = [string[]]@()
+    if ($NewHead -ne $OrigHead)
+    {
+        $changed = Split-IpeLines (Invoke-Git -Worktree $Source -Arguments @('-c', 'core.quotepath=false', 'diff', '--name-only', '--no-renames', $OrigHead, $NewHead)).StdOut
+    }
+
+    $ids = Get-IpeMergeMutationIds -Directory $SpecDirectory -Tree $Source -Config $Config -Files $changed
+    if ($ids.Count -eq 0)
+    {
+        $report.Add("mutations: none selected ($($changed.Count) file(s) changed by the rebase and no record edits them)")
+        $mutationText = 'mutations: none selected'
+    }
+    else
+    {
+        $mutationArguments = @{ Worktree = $Source; SpecDir = $SpecDirectory; Only = $ids; Tag = "ff-$Id-mutations"; ConfigPath = $Config.ConfigPath }
+        if ($Drive)
+        {
+            $mutationArguments.Drive = $Drive
+        }
+
+        $mutations = Invoke-Mutations @mutationArguments
+        $report.AddRange([string[]]$mutations.Report)
+        if ($mutations.ExitCode -ne 0)
+        {
+            return [pscustomobject]@{ Passed = $false; Line = "mutations $($ids -join ', ') failed"; SummaryPath = $check.SummaryPath; Report = $report.ToArray() }
+        }
+
+        $mutationText = "mutations $($ids -join ', ') as expected"
+    }
+
+    return [pscustomobject]@{
+        Passed = $true
+        Line = "full check of $newShort against $preShort passed (tag ff-$Id); $mutationText"
+        SummaryPath = $check.SummaryPath
+        Report = $report.ToArray()
+    }
+}
+
 function Merge-Ticket
 {
     [CmdletBinding(DefaultParameterSetName = 'Feature')]
@@ -4597,6 +4969,7 @@ function Merge-Ticket
         [Parameter(Mandatory, ParameterSetName = 'Feature')][string]$Feature,
         [Parameter(Mandatory, ParameterSetName = 'SpecDir')][string]$SpecDir,
         [switch]$Continue,
+        [switch]$FastForwardOnly,
         [string]$Drive,
         [string]$ConfigPath
     )
@@ -4604,6 +4977,11 @@ function Merge-Ticket
     Assert-IpeAbsolutePath -Path $Integration -Name 'Integration'
     Assert-IpeAbsolutePath -Path $Source -Name 'Source'
     Assert-IpeName -Value $Id -Name 'Id'
+    if ($FastForwardOnly -and $Continue)
+    {
+        throw (New-IpeErrorRecord -ErrorId 'Ipe.BadArguments' -Message '-FastForwardOnly takes no -Continue: a rebase conflict is aborted, so there is nothing to continue' -Category InvalidArgument)
+    }
+
     $integrationTree = Get-IpeTopLevel -Worktree $Integration
     $sourceTree = Get-IpeTopLevel -Worktree $Source
     if (Test-IpeSamePath $integrationTree $sourceTree)
@@ -4630,6 +5008,21 @@ function Merge-Ticket
     }
 
     $branch = $branchResult.Lines[0].Trim()
+    if ($FastForwardOnly)
+    {
+        $fastForwardArguments = @{ Integration = $integrationTree; Source = $sourceTree; Branch = $branch; Id = $Id; Config = $config; Drive = $Drive }
+        if ($PSCmdlet.ParameterSetName -eq 'Feature')
+        {
+            $fastForwardArguments.Feature = $Feature
+        }
+        else
+        {
+            $fastForwardArguments.SpecDir = $specDirectory
+        }
+
+        return Invoke-IpeFastForwardMerge @fastForwardArguments
+    }
+
     $sourceHead = Get-IpeHead -Worktree $sourceTree
     $sourceShort = Get-IpeHead -Worktree $sourceTree -Short
     $mergeHead = Get-IpeMergeHead -Worktree $integrationTree

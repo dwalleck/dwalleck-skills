@@ -1,6 +1,7 @@
 #Requires -Version 7.2
 # Entry point: pwsh -NoProfile -File ipe.ps1 <Command> -Name value [-Switch] ...
-# Exit codes: 0 pass, 1 fail or error, 2 drive conflict (Ipe.DriveConflict), 3 merge conflict (Ipe.MergeConflict).
+# Exit codes: 0 pass, 1 fail or error, 2 drive conflict (Ipe.DriveConflict), 3 merge conflict (Ipe.MergeConflict, merge
+# left in progress) or rebase conflict (Ipe.RebaseConflict, rebase aborted, branches unchanged).
 # Plain $args, not a param block: [Parameter] attributes would make this an advanced script, and PowerShell would bind
 # a command's parameter against this script's common parameters first (-Out is ambiguous with -OutVariable/-OutBuffer).
 $Command = if ($args.Count -gt 0) { [string]$args[0] } else { $null }
@@ -79,6 +80,10 @@ catch
             exit 2
         }
         'Ipe.MergeConflict'
+        {
+            exit 3
+        }
+        'Ipe.RebaseConflict'
         {
             exit 3
         }
