@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# implement-spec toolkit: one module for the build, test, check and git chores the implement-spec workflow repeats.
+# repo-toolkit: one module for a repo's build, test, check and git chores.
 # Every external process goes through Invoke-IpeProcess and every git call through Invoke-Git. Repo-specific values
 # come only from the repo's config file (see Import-IpeConfig); nothing here names a repo or a machine.
 Set-StrictMode -Version Latest

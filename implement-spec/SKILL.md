@@ -22,8 +22,10 @@ Keep a **rules file** beside the ledger: the current rules every subagent follow
 
 When writing a subagent prompt, start from [PROMPTS.md](PROMPTS.md).
 
-**Toolkit**: every build, test, check, commit and merge goes through `scripts/ipe.ps1`
-([scripts/README.md](scripts/README.md)), configured by the repo's `.kiro/implement-spec.psd1`. The root agent creates
+**Toolkit**: every build, test, check, commit and merge goes through `.kiro\skills\repo-toolkit\scripts\ipe.ps1`, the
+repo-toolkit skill ([repo-toolkit scripts/README.md](../repo-toolkit/scripts/README.md)), configured by the repo's
+`.kiro/repo-toolkit.psd1` (the old name `.kiro/implement-spec.psd1` is still read) plus its `.local.psd1` overlay for
+machine values. implement-spec requires the repo-toolkit skill installed beside implement-spec. The root agent creates
 worktrees with `New-TicketWorktree` and edits the ledger only with `Update-Ledger`. It records a workflow id only from
 the `run_workflow` result. It lists every finding of the reviews in steps 5, 7 and 8, with no cap, through
 `Export-ReviewFindings`.

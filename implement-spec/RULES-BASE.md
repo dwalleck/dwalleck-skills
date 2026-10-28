@@ -13,9 +13,11 @@ line came from a retro of an earlier run.
 
 ## Toolkit
 
-- Build, test, check, commit and merge only through `scripts/ipe.ps1` (see [scripts/README.md](scripts/README.md)).
-  The repo's `.kiro/implement-spec.psd1` configures it. When it lacks a job, add the job to the toolkit instead of
-  writing a one-off script.
+- Build, test, check, commit and merge only through `.kiro\skills\repo-toolkit\scripts\ipe.ps1`, the repo-toolkit
+  skill (see [repo-toolkit scripts/README.md](../repo-toolkit/scripts/README.md)), which must be installed beside
+  implement-spec. The repo's `.kiro/repo-toolkit.psd1` (the old name `.kiro/implement-spec.psd1` is still read)
+  configures it, plus its `.local.psd1` overlay for machine values. When it lacks a job, add the job to the toolkit
+  instead of writing a one-off script.
 - Commit only with `Commit-Change`.
 - Search worktrees and paths outside the workspace with `Search-Worktree`.
 
@@ -55,7 +57,7 @@ line came from a retro of an earlier run.
 - Check a ticket's mutations into the repo's mutation spec directory in the ticket's last code commit, in a form the
   run's mutation runner reads (file, original text, mutated text, expected match count, test filter), so mergers
   rerun them instead of rewriting them. The runner is `Invoke-Mutations`, and the record format is its front matter
-  (scripts/README.md).
+  (../repo-toolkit/scripts/README.md).
 - A mutation run restores every file byte for byte in a `finally`, runs each test under its own timeout, and ends by
   checking the tree is clean. A run killed from outside skips its `finally`: after any timeout or kill, restore and
   check the tree before doing anything else (`Invoke-Mutations -RestoreOnly`, then `Stop-TestHosts`).

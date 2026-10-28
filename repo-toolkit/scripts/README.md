@@ -1,7 +1,8 @@
-# implement-spec toolkit (`ipe.ps1`)
+# repo-toolkit (`ipe.ps1`)
 
-One PowerShell module for the chores every implement-spec agent repeats: building, testing, the full check, mutation
-runs, commits, merges, ticket resolution, worktrees, the run ledger and review findings. Agents call these commands
+One PowerShell module for the chores agents repeat in a repo: building, testing, the full check, mutation runs,
+commits, merges, review bundles, ticket resolution, worktrees, the run ledger and review findings. The implement-spec
+workflow uses it, and so can any other agent working in a configured repo. Agents call these commands
 instead of writing their own scripts. When the toolkit lacks a job, add the job to the toolkit.
 
 Every external process runs with a timeout and through `ArgumentList`, so there is no string concatenation. A timeout
@@ -20,8 +21,8 @@ in the repo's config file. The module names no repo and no machine.
 ## Running
 
 ```
-pwsh -NoProfile -File <skill dir>\scripts\ipe.ps1 <Command> -Name value [-Switch] ...
-pwsh -NoProfile -File <skill dir>\scripts\ipe.ps1 help
+pwsh -NoProfile -File .kiro\skills\repo-toolkit\scripts\ipe.ps1 <Command> -Name value [-Switch] ...
+pwsh -NoProfile -File .kiro\skills\repo-toolkit\scripts\ipe.ps1 help
 ```
 
 - Pass every path as an absolute path.
@@ -210,7 +211,7 @@ An implementer's handoff points to this record instead of restating the results.
 ## Self-tests
 
 ```
-pwsh -NoProfile -File <skill dir>\scripts\tests\Run-SelfTests.ps1 [-Name <wildcard>]
+pwsh -NoProfile -File .kiro\skills\repo-toolkit\scripts\tests\Run-SelfTests.ps1 [-Name <wildcard>]
 ```
 
 The runner prints `PASS`/`FAIL` for each test and a total, and exits 1 on any failure. Tests that change git state run
