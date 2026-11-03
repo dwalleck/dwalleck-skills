@@ -1,0 +1,81 @@
+# Outcomes of scripts/probe against TUnit 1.77.0 (newest on NuGet, 2026-10-31).
+# PASS = the assertion passed; FAIL = it threw (type :: message). Each line backs a claim in SKILL.md.
+# Regenerate with scripts/Invoke-AssertionProbe.ps1 when moving the baseline to a newer TUnit.
+B01 unawaited IsEqualTo(2) on 5 => PASS
+B02 value .And then .Or => FAIL TUnit.Assertions.Exceptions.MixedAndOrAssertionsException :: Don't mix 'Or' & 'And' operators in assertions.
+B03 Member .And then .Or => PASS
+B04a List IsEqualTo List same contents => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equal to [1, 2] | but received [1, 2] (same contents, different reference - use IsEquivalentTo to compare by contents) |  | at Assert.That(new List<int> { 1, 2 }).IsEqualTo(new List<int> { 1, 2 })
+B04b int[] IsEqualTo int[] same contents => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equal to [1, 2] | but received [1, 2] (same contents, different reference - use IsEquivalentTo to compare by contents) |  | at Assert.That(new[] { 1, 2 }).IsEqualTo(new[] { 1, 2 })
+B05 Thing IsEquivalentTo Thing same values (no Equals override) => PASS
+B05b Thing IsEquivalentTo Thing different Age => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected new Thing { Name = "a", Age = 1 } to be equivalent to new Thing { Name = "a", Age = 2 } | but Property Age did not match | Expected: 2 | Received: 1 |  | at Assert.That(new Thing { Name = "a", Age = 1 }).IsEquivalentTo(new Thing { Name = "a", Age = 2 })
+B05c nested Order IsEquivalentTo, inner Age differs => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected new Order { Id = 1, Lines = [new Thing { Name = "a", Age = 1 }] } to be equivalent to new Order { Id = 1, Lines = [new Thing { Name = "a", Age = 2 }] } | but Property Lines.[0].Age did not match | Expected: 2 | Received: 1 |  | at Assert.That(new Order { Id = 1, Lines = [new Thing { Name = "a", Age = 1 }] }).IsEquivalentTo(new Order { Id = 1, Lines = [new Thing { Name = "a", Age = 2 }] })
+B05d IsEquivalentTo IgnoringMember(Age) => PASS
+B06 Thing IsEqualTo Thing same values (no Equals override) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equal to AssertionProbe.Thing | but received AssertionProbe.Thing |  | at Assert.That(new Thing { Name = "a", Age = 1 }).IsEqualTo(new Thing { Name = "a", Age = 1 })
+B07 Thing[] IsEquivalentTo Thing[] same values, reversed => PASS
+B08a WithMessage("*input*") on 'bad input here' => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected exception message to equal "*input*" | but exception message was "bad input here" |  | at Assert.That(() => throw new ArgumentException("bad input here")).Throws<ArgumentException>().WithMessage("*input*")
+B08b WithMessageMatching("*input*") on 'bad input here' => PASS
+B08c WithMessage exact on ArgumentException(msg, paramName) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected exception message to equal "bad" | but exception message was "bad (Parameter 'p')" |  | at Assert.That(() => throw new ArgumentException("bad", "p")).Throws<ArgumentException>().WithMessage("bad")
+B09a Throws<ArgumentException> on ArgumentNullException => PASS
+B09b ThrowsExactly<ArgumentException> on ArgumentNullException => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to throw exactly ArgumentException | but wrong exception type: ArgumentNullException instead of exactly ArgumentException |  | at Assert.That(() => throw new ArgumentNullException("p")).ThrowsExactly<ArgumentException>()
+B10 Throws<> when nothing thrown => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to throw InvalidOperationException | but no exception was thrown |  | at Assert.That(() => Five()).Throws<InvalidOperationException>()
+B11 Assert.Multiple two failures => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 1 | but found 5 |  | at Assert.That(Five()).IsEqualTo(1) |  | Expected to be equal to "abd" | but received "abc" |  | at Assert.That("abc").IsEqualTo("abd")
+B12a IsTrue(list.Count > 0) message => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be true | but found False |  | at Assert.That(list.Count > 0).IsTrue()
+B12b IsNotEmpty() message => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to not be empty | but received empty collection |  | at Assert.That(list).IsNotEmpty()
+B12c string IsEqualTo message => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equal to "The quick brawn fox" | but received "The quick brown fox" |  | at Assert.That("The quick brown fox").IsEqualTo("The quick brawn fox")
+B12d IsEquivalentTo message => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equivalent to [1, 2, 4] | but collection does not contain expected item: 4 |  | at Assert.That(new[] { 1, 2, 3 }).IsEquivalentTo(new[] { 1, 2, 4 })
+B13 IsBetween(0,10) on 10 => PASS
+B14a 0.1+0.2 IsEqualTo 0.3 => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 0.3 | but found 0.30000000000000004 |  | at Assert.That(d + 0.2).IsEqualTo(0.3)
+B14b 0.1+0.2 IsEqualTo 0.3 Within 1e-9 => PASS
+B15a IsTypeOf<Animal> on Dog => PASS
+B15b IsAssignableTo<Animal> on Dog => PASS
+B16 Count(i => i.IsGreaterThan(1)).IsEqualTo(2) on [1,2,3] => PASS
+B17a IsEquivalentTo reversed (default) => PASS
+B17b IsEquivalentTo reversed (Matching) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equivalent to [3, 2, 1] | but collection item at index 0 does not match: expected 3, but was 1 |  | at Assert.That(new[] { 1, 2, 3 }).IsEquivalentTo(new[] { 3, 2, 1 }, CollectionOrdering.Matching)
+B17c [1,1,2] IsEquivalentTo [1,2,2] => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equivalent to [1, 2, 2] | but collection does not contain expected item: 2 |  | at Assert.That(new[] { 1, 1, 2 }).IsEquivalentTo(new[] { 1, 2, 2 })
+B18 Assert.That(faultedTask).Throws<> => PASS
+B19a Assert.That(() => FailAsync()).Throws<> => PASS
+B19b Assert.That(async () => await FailAsync()).Throws<> => PASS
+B20 Satisfies(pred, "must be even") failure => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to satisfy must be even | but received 5 |  | at Assert.That(Five()).Satisfies(must be even)
+B21 Because(...) failure => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 6, because the fee is fixed | but found 5 |  | at Assert.That(Five()).IsEqualTo(6).Because("the fee is fixed")
+B22 Throws<> returns exception with ParamName => PASS
+B23 DateTime IsEqualTo Within 2s (1s apart) => PASS
+B24 HasSingleItem on two items => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to have exactly one item | but received 2 item(s) |  | at Assert.That(new[] { 1, 2 }).HasSingleItem()
+B25 IsNotNull then dereference => PASS
+B26 'a  b' IsEqualTo 'a b' IgnoringWhitespace => PASS
+B27 WaitsFor flag set after 200ms => PASS
+B28 IsNotNull().And.IsEqualTo on null => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to not be null | but received null |  | at Assert.That(s).IsNotNull().And.IsEqualTo("x")
+B29 ThrowsNothing returns delegate value => PASS
+B30 using var Assert.Multiple; two failures => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 1 | but found 5 |  | at Assert.That(Five()).IsEqualTo(1) |  | Expected to be 2 | but found 5 |  | at Assert.That(Five()).IsEqualTo(2)
+B31 record IsEqualTo same values => PASS
+B32 Thing[] Contains(new Thing same values) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to contain AssertionProbe.Thing | but the item was not found in the collection |  | at Assert.That(new[] { new Thing { Name = "a" } }).Contains(new Thing { Name = "a" })
+B33 decimal Within => PASS
+B34 WithInnerException<FormatException> when inner is ArgumentException => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected exception to have inner exception of type FormatException | but inner exception was ArgumentException instead of FormatException |  | at Assert.That(() => throw new InvalidOperationException("o", new ArgumentException("i"))).Throws<InvalidOperationException>().WithInnerException<FormatException>()
+B35 Contains('WORLD').IgnoringCase => PASS
+B36 failing assertion exception type => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 4 | but found 5 |  | at Assert.That(Five()).IsEqualTo(4)
+B37 IsEqualTo on two List<Thing> via IsEquivalentTo with Using predicate => PASS
+C01 IsTypeOf<Animal> on Dog, static type Animal => PASS
+C02 IsTypeOf<Dog> on Dog, static object => PASS
+C03 IsNotTypeOf<Animal> on Dog => PASS
+C04 IsTypeOf<Dog> on Animal instance => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be of type Dog | but Value is of type Animal, not Dog |  | at Assert.That(o).IsTypeOf<Dog>()
+C04b IsTypeOf<object> on string => PASS
+C05 Assert.That(Task<int> 42).IsEqualTo(42) => PASS
+C06 Assert.That(async () => await GetAsync()).IsEqualTo(42) => PASS
+C07 Assert.That(Task<int> 42).IsEqualTo(41) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 41 | but found 42 |  | at Assert.That(GetAsync()).IsEqualTo(41)
+C08 Throws<Exception> on NullReferenceException => PASS
+C09 Thing IsEquivalentTo anonymous {Name, Age} => PASS
+C10 Assert.That(() => 5).IsEqualTo(5) => PASS
+C11 Assert.Multiple: failure then NRE => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be 3 | but found 2 |  | at Assert.That(1 + 1).IsEqualTo(3)
+C12 Member .Or only, first fails second passes => PASS
+C13 Member A(true).And B(false).Or C(false) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Both conditions failed: | 1) Expected to be 2 | but found 1 |  | at Assert.That(new Thing { Name = "a", Age = 1 }).Member(x => x.Name, ...).IsEqualTo("a").And.Member(x => x.Age, ...).IsEqualTo(2).Or.Member(x => x.Age, ...).IsEqualTo(3) | 2) Expected to be 3 | but found 1 |  | at Assert.That(new Thing { Name = "a", Age = 1 }).Member(x => x.Name, ...).IsEqualTo("a").And.Member(x => x.Age, ...).IsEqualTo(2).Or.Member(x => x.Age, ...).IsEqualTo(3)
+C14 Count().IsEqualTo(3).And.Contains(9) => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to have count equal to 3 | 	and to contain 9 | but the item was not found in the collection |  | at Assert.That(new[] { 1, 2, 3 }).Count().IsEqualTo(3).And.Contains(9)
+C15 dictionary IsEquivalentTo reordered => PASS
+C16 All(predicate) failure message => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected all items to satisfy x => x > 0 | but item at index 1 with value [-2] does not satisfy predicate |  | at Assert.That(new[] { 1, -2, 3 }).All(x => x > 0)
+C17 All().Satisfy(builder) failure message => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected all items to satisfy x => x.IsPositive() | but item at index 1 failed assertion: Expected to be greater than 0 | but received -2 |  | at Assert.That(item[1]).IsPositive() |  | at Assert.That(new[] { 1, -2, 3 }).All().Satisfy(x => x.IsPositive())
+C18 WithParameterName wrong => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected ArgumentException to have parameter name "expected" | but ArgumentException parameter name was "actual" |  | at Assert.That(() => throw new ArgumentNullException("actual")).Throws<ArgumentNullException>().WithParameterName("expected")
+C19 Satisfies(pred).Because(reason) failure => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to satisfy v => v % 2 == 0, because the batch size must be even | but received 5 |  | at Assert.That(1 + 4).Satisfies(v => v % 2 == 0).Because("the batch size must be even")
+C20 GetType() IsEqualTo typeof(Animal) on Dog => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to be equal to AssertionProbe.Animal | but received AssertionProbe.Dog |  | at Assert.That(o.GetType()).IsEqualTo(typeof(Animal))
+D01 Matches("^hello").IgnoringCase() on 'Hello World' => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to match pattern | but The regex "^hello" does not match with "Hello World" |  | at Assert.That("Hello " + "World").Matches("^hello").IgnoringCase()
+D02 Matches("^hello").WithOptions(IgnoreCase) on 'Hello World' => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to match pattern | but The regex "^hello" does not match with "Hello World" |  | at Assert.That("Hello " + "World").Matches("^hello").WithOptions(IgnoreCase)
+D03 Matches(new Regex("^hello", IgnoreCase)) on 'Hello World' => PASS
+D04 Matches("(?i)^hello") on 'Hello World' => PASS
+D05 Matches("^Line 2$").WithOptions(Multiline) on 3 lines => FAIL TUnit.Assertions.Exceptions.AssertionException :: Expected to match pattern | but The regex "^Line 2$" does not match with "Line 1 | Line 2 | Line 3" |  | at Assert.That("Line 1\nLine 2\nLine 3").Matches("^Line 2$").WithOptions(Multiline)

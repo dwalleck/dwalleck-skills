@@ -1,0 +1,497 @@
+name: tunit-assertions
+description: Evaluates assertion selection, review, and repair for TUnit tests
+type: capability
+defaults:
+  timeout: 5m
+  runs: 1
+stimuli:
+  - name: review-collection-content-comparison
+    prompt: |
+      Review these TUnit tests from a project using TUnit 1.77.0. The first test compares
+      two separately-created lists, the second compares two arrays with the same values, and
+      the third test intentionally requires the elements to appear in the same order. Explain
+      which checks are testing the wrong thing and provide corrected assertion code. Include
+      a concise review table and a final verdict.
+
+      ```csharp
+      [Test]
+      public async Task Lists_match()
+      {
+          await Assert.That(new List<int> { 1, 2, 3 })
+              .IsEqualTo(new List<int> { 1, 2, 3 });
+      }
+
+      [Test]
+      public async Task Arrays_match()
+      {
+          await Assert.That(new[] { "a", "b" })
+              .IsEqualTo(new[] { "a", "b" });
+      }
+
+      [Test]
+      public async Task Ordered_values_match()
+      {
+          await Assert.That(new[] { 1, 2, 3 })
+              .IsEquivalentTo(new[] { 3, 2, 1 });
+      }
+      ```
+    tags:
+      capability: collection-equivalence
+      risk: reference-equality-risk
+      journey: review-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: '(?im)^\s*TUnit\s+1\.\d+\b.*$'
+      - type: output-matches
+        config:
+          pattern: '(?im)^\s*\|?\s*File(?::line)?\s*\|\s*Current\s*\|\s*Category\s*\|\s*Problem\s*\|\s*Replacement\s*\|?\s*$'
+      - type: output-matches
+        config:
+          pattern: '(?im)^\s*\|[^|\r\n]+\|[^|\r\n]+\|[^|\r\n]*(?:cannot[- ]fail|wrong[- ]check|will[- ]break|weak[- ]message)[^|\r\n]*\|[^|\r\n]+\|[^|\r\n]+\|'
+      - type: output-matches
+        config:
+          pattern: '(?is)(wrong[- ]check|wrong check)'
+      - type: output-matches
+        config:
+          pattern: '(?is)(IsEquivalentTo|CollectionOrdering|order|reference)'
+      - type: output-matches
+        config:
+          pattern: '(?is)Verdict\s*:\s*\S[^\r\n]*(?:\r?\n\s*)*\s*$'
+      - type: prompt
+    rubric:
+      - Identified that reference equality is inappropriate for separately-created lists and arrays when their contents are the subject of the test.
+      - Recommended a supported content comparison and explained why it matches the intended behavior.
+      - Preserved ordering semantics for the order-sensitive case instead of accepting any permutation.
+      - Supplied actionable replacements and a review verdict without changing unrelated test behavior.
+
+  - name: review-object-graph-comparison
+    prompt: |
+      Review this test. The production type and its nested line type do not override Equals.
+      The test should compare the complete object graph while ignoring a generated timestamp.
+      Point out any incorrect assertion choices and show a corrected version that reports the
+      nested member when values differ.
+
+      ```csharp
+      public sealed class Invoice
+      {
+          public int Id { get; init; }
+          public DateTime GeneratedAt { get; init; }
+          public List<InvoiceLine> Lines { get; init; } = [];
+      }
+
+      public sealed class InvoiceLine
+      {
+          public string Sku { get; init; } = "";
+          public decimal Amount { get; init; }
+      }
+
+      [Test]
+      public async Task Invoice_matches()
+      {
+          Invoice actual = GetInvoice();
+          Invoice expected = ExpectedInvoice();
+
+          await Assert.That(actual).IsEqualTo(expected);
+          await Assert.That(actual.Lines[0]).IsEqualTo(expected.Lines[0]);
+      }
+      ```
+    tags:
+      capability: object-equivalence
+      risk: shallow-equality-risk
+      journey: review-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(deep|structural|member|object.graph).*(equivalent|comparison|compare)
+      - type: output-matches
+        config:
+          pattern: (?is)(IgnoringMember|ignore.*GeneratedAt|generated timestamp)
+      - type: output-matches
+        config:
+          pattern: (?is)(IsEquivalentTo|deep.*comparison|equivalent)
+      - type: prompt
+    rubric:
+      - Recognized that reference equality does not verify the values of these classes or their nested lines.
+      - Proposed a deep comparison that covers nested members and excludes only the generated timestamp.
+      - Explained that the resulting failure identifies the mismatching member or path.
+
+  - name: review-exception-type-and-message
+    prompt: |
+      Review these exception tests. They must reject an unrelated exception type, match a
+      message fragment as a wildcard, and verify an argument name even though the framework
+      appends a parameter suffix to the message. Give corrected assertion code for each issue.
+
+      ```csharp
+      [Test]
+      public async Task Rejects_wrong_exception()
+      {
+          await Assert.That(() => throw new NullReferenceException())
+              .Throws<Exception>();
+      }
+
+      [Test]
+      public async Task Message_contains_input()
+      {
+          await Assert.That(() => throw new InvalidOperationException("bad input here"))
+              .Throws<InvalidOperationException>()
+              .WithMessage("*input*");
+      }
+
+      [Test]
+      public async Task Argument_name_is_checked()
+      {
+          await Assert.That(() => throw new ArgumentException("bad", "value"))
+              .Throws<ArgumentException>()
+              .WithMessage("bad");
+      }
+      ```
+    tags:
+      capability: exception-contracts
+      risk: false-positive-risk
+      journey: review-error-test
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(ThrowsExactly|specific exception|exact exception)
+      - type: output-matches
+        config:
+          pattern: (?is)(NullReferenceException|Throws<Exception>|broad exception)
+      - type: output-matches
+        config:
+          pattern: (?is)(WithMessageMatching|message.*contain|wildcard)
+      - type: output-matches
+        config:
+          pattern: (?is)(WithMessage\(|exact)
+      - type: output-matches
+        config:
+          pattern: (?is)(WithParameterName|parameter name)
+      - type: output-matches
+        config:
+          pattern: (?is)(WithMessageContaining|suffix|ArgumentException)
+      - type: prompt
+    rubric:
+      - Replaced the broad exception expectation with a contract that rejects an unrelated exception type.
+      - Distinguished an exact message check from a wildcard or substring check and used the appropriate form.
+      - Accounted for the parameter-name suffix instead of asserting the bare argument message as exact text.
+
+  - name: review-exact-runtime-type
+    prompt: |
+      A test must fail when the value is a Dog but must pass only for an exact Animal instance.
+      Review the assertion below, explain whether it can accept a derived value, and provide a
+      corrected assertion that checks the runtime type exactly.
+
+      ```csharp
+      [Test]
+      public async Task Value_is_exactly_an_animal()
+      {
+          Animal value = new Dog();
+          await Assert.That(value).IsTypeOf<Animal>();
+      }
+      ```
+    tags:
+      capability: runtime-type
+      risk: subclass-false-pass
+      journey: review-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(IsTypeOf|subclass|derived|assignable)
+      - type: output-matches
+        config:
+          pattern: (?is)(GetType\(\)|exact runtime type)
+      - type: output-matches
+        config:
+          pattern: (?is)(IsEqualTo|typeof\(Animal\))
+      - type: prompt
+    rubric:
+      - Recognized that the generic type assertion accepts a derived instance and therefore can pass incorrectly here.
+      - Supplied a check that compares the actual runtime type with the required type exactly.
+      - Preserved the test's intended distinction between an Animal instance and a Dog instance.
+
+  - name: review-regex-option-semantics
+    prompt: |
+      Review these string assertions. They are intended to match a greeting without regard to
+      case and to match a middle line in a multi-line value. Determine why the current fluent
+      options do not achieve those goals and provide compiling alternatives.
+
+      ```csharp
+      [Test]
+      public async Task Greeting_is_case_insensitive()
+      {
+          await Assert.That("Hello world")
+              .Matches("^hello")
+              .IgnoringCase();
+      }
+
+      [Test]
+      public async Task Middle_line_matches()
+      {
+          await Assert.That("Line 1\nLine 2\nLine 3")
+              .Matches("^Line 2$")
+              .WithOptions(RegexOptions.Multiline);
+      }
+      ```
+    tags:
+      capability: regex-matching
+      risk: ignored-option-risk
+      journey: review-string-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(ignored|no effect|inert|does not)
+      - type: output-matches
+        config:
+          pattern: (?is)(IgnoringCase|WithOptions|Matches)
+      - type: output-matches
+        config:
+          pattern: (?is)(Regex\(|inline|\(\?i\)|RegexOptions)
+      - type: output-matches
+        config:
+          pattern: (?is)(case|multiline|option)
+      - type: prompt
+    rubric:
+      - Identified that the fluent modifiers shown do not apply the requested regular-expression options.
+      - Provided a compiling alternative using a configured regex or inline options for both cases.
+      - Preserved the intended case-insensitive and multi-line matching behavior.
+
+  - name: fix-async-assertion-awaiting
+    prompt: |
+      Repair this TUnit test. The asynchronous operation throws InvalidOperationException, but
+      the assertion is not awaited and the fluent method used for asynchronous exceptions is not
+      available in this form. Return the corrected test code and briefly explain why it observes
+      the exception.
+
+      ```csharp
+      [Test]
+      public async Task Failing_operation_is_reported()
+      {
+          _ = Assert.That(() => LoadAsync())
+              .ThrowsAsync<InvalidOperationException>();
+      }
+
+      private static async Task LoadAsync()
+      {
+          await Task.Yield();
+          throw new InvalidOperationException("failed");
+      }
+      ```
+    tags:
+      capability: async-assertions
+      risk: silent-pass-risk
+      journey: fix-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)await\s+Assert\.That.*Throws(<|Exactly<).*InvalidOperationException
+      - type: output-not-matches
+        config:
+          pattern: ThrowsAsync\s*<
+      - type: prompt
+    rubric:
+      - Returned an awaited assertion that observes the asynchronous exception rather than discarding the assertion task.
+      - Used a supported form for asserting an exception from an asynchronous operation and preserved the specific exception type.
+      - Explained the compile or runtime problem without introducing unrelated changes.
+
+  - name: review-assertion-composition
+    prompt: |
+      Review this test for assertion composition problems. It should express either alternative
+      condition without mixing operators, and it should collect multiple assertion failures while
+      correctly managing the scope. Provide the smallest correction and explain the runtime or
+      analyzer consequences of the original code.
+
+      ```csharp
+      [Test]
+      public async Task Result_has_an_allowed_shape()
+      {
+          await Assert.That(result.Code)
+              .IsEqualTo(200)
+              .And.IsGreaterThan(0)
+              .Or.IsEqualTo(202);
+
+          Assert.Multiple();
+          await Assert.That(result.Body).IsNotEmpty();
+          await Assert.That(result.Headers).ContainsKey("Content-Type");
+      }
+      ```
+    tags:
+      capability: assertion-composition
+      risk: runtime-composition-risk
+      journey: review-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(do not mix|mixing|MixedAndOr|split|single.*operator)
+      - type: output-matches
+        config:
+          pattern: (?is)(And|Or)
+      - type: output-matches
+        config:
+          pattern: (?is)(using|dispose|disposed|using var)
+      - type: output-matches
+        config:
+          pattern: (?is)(Assert\.Multiple|multiple)
+      - type: prompt
+    rubric:
+      - Identified the mixed And/Or chain as invalid or ambiguous and supplied a correction using separate alternatives or one operator consistently.
+      - Correctly managed the multiple-assertion scope so failures are collected and the scope is disposed.
+      - Kept the correction limited to the two composition defects.
+
+  - name: review-derived-boolean-diagnostics
+    prompt: |
+      Improve these assertions without changing what they test. The current failures expose only
+      a boolean result, which makes a failing test harder to diagnose. Replace each derived
+      boolean assertion with the most specific check for the original collection or string.
+
+      ```csharp
+      [Test]
+      public async Task Values_are_present()
+      {
+          List<int> values = GetValues();
+          string name = GetName();
+
+          await Assert.That(values.Count > 0).IsTrue();
+          await Assert.That(name.Contains("admin", StringComparison.OrdinalIgnoreCase)).IsTrue();
+      }
+      ```
+    tags:
+      capability: diagnostic-specificity
+      risk: weak-boolean-risk
+      journey: review-collection-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(IsNotEmpty|Contains\(|specific assertion|specialized assertion)
+      - type: output-matches
+        config:
+          pattern: (?is)(values|name|collection|string)
+      - type: output-matches
+        config:
+          pattern: (?is)(better|useful|diagnostic|failure message|reports)
+      - type: output-matches
+        config:
+          pattern: (?is)(boolean|subject|collection|string)
+      - type: prompt
+    rubric:
+      - Replaced the count-derived boolean with a collection assertion that states the intended non-empty condition.
+      - Replaced the string-derived boolean with a direct containment assertion while retaining case-insensitive matching.
+      - Explained how the replacements improve failure information while preserving behavior.
+
+  - name: fix-obsolete-assertion-apis
+    prompt: |
+      Update this compact set of TUnit assertions to APIs supported by the current release. Keep
+      the intent of every check, including the member check, cancellation check, and collection
+      content check. Return corrected code and identify any form that did not exist rather than
+      inventing an overload.
+
+      ```csharp
+      await Assert.That(items).HasCount(2);
+      await Assert.That(text).HasLength(4);
+      await Assert.That(order).HasMember(x => x.Id, 7);
+      await Assert.That(operation).IsCancelled();
+      await Assert.That(actualItems).ContainsAll(expectedItems);
+      ```
+    tags:
+      capability: current-api-compatibility
+      risk: compile-error-risk
+      journey: fix-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(Count\(\)|Length\(\)|Member\(|IsCanceled|IsEquivalentTo|Contains\()
+      - type: output-matches
+        config:
+          pattern: (?is)(HasCount|HasLength|HasMember|IsCancelled|ContainsAll)
+      - type: output-matches
+        config:
+          pattern: (?is)(obsolete|does not exist|missing|unsupported)
+      - type: output-matches
+        config:
+          pattern: (?is)(HasCount|HasLength|HasMember|IsCancelled|ContainsAll)
+      - type: output-not-matches
+        config:
+          pattern: IsCancelled\s*\(
+      - type: prompt
+    rubric:
+      - Replaced obsolete count and length forms with supported assertions that preserve their exact numeric intent.
+      - Replaced the member, cancellation, and collection checks with supported forms that preserve what each test verifies.
+      - Called out nonexistent or unsupported forms rather than presenting code that would still fail to compile.
+
+  - name: write-generated-custom-assertion
+    prompt: |
+      Write a small custom TUnit assertion for this domain type. It must check that an Order has
+      an exact number of lines and be usable from an awaited assertion in a test. Include the
+      declaration and one example call. Keep the example limited to the extension point needed
+      for this boolean condition.
+
+      ```csharp
+      public sealed class Order
+      {
+          public List<OrderLine> Lines { get; init; } = [];
+      }
+
+      public sealed class OrderLine
+      {
+          public string Sku { get; init; } = "";
+      }
+      ```
+    tags:
+      capability: custom-assertion-extension
+      risk: generator-compile-risk
+      journey: write-test-assertion
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(GenerateAssertion|custom.*assertion)
+      - type: output-matches
+        config:
+          pattern: (?is)(static|partial|bool|AssertionResult)
+      - type: output-matches
+        config:
+          pattern: (?is)await\s+Assert\.That\(\s*[A-Za-z_]\w*\s*\)\s*\.\w+
+      - type: output-matches
+        config:
+          pattern: (?is)(HasLineCount|line.*count|Count\(\))
+      - type: output-matches
+        config:
+          pattern: (?is)(\b2\b|exact)
+      - type: prompt
+    rubric:
+      - Declared a supported generated custom assertion with the subject as its first parameter and a supported result shape.
+      - Used the required partial class and generator metadata shape so the extension can be generated.
+      - Demonstrated an awaited test assertion that checks the exact order-line count.
+
+  - name: route-test-structure-request
+    prompt: |
+      I am setting up a TUnit project and need help choosing [Arguments] and data sources,
+      lifecycle hooks, parallelism settings, and project configuration. Explain which guidance
+      covers those concerns and what information I should gather before changing the project.
+      Do not rewrite any assertion expressions.
+    expect_activation: false
+    tags:
+      capability: test-structure-routing
+      risk: wrong-specialist-routing
+      journey: configure-test-project
+    graders:
+      - type: exit-success
+      - type: output-matches
+        config:
+          pattern: (?is)(test structure|project setup|data source|lifecycle|parallelism).*(writing|configuration|setup|guidance)
+      - type: output-not-matches
+        config:
+          pattern: (?is)(replace|rewrite|use)\s+(Assert\.That|IsEqualTo|IsEquivalentTo|Throws)
+      - type: prompt
+    rubric:
+      - Recognized that the request concerns test structure, data sources, lifecycle, parallelism, and project setup rather than assertion selection.
+      - Redirected the requester to the appropriate test-structure guidance or process.
+      - Stayed dormant, did not propose assertion API changes, and did not pretend to review assertion behavior.

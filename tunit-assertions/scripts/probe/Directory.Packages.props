@@ -1,0 +1,6 @@
+<Project>
+  <!-- Stops an enclosing Directory.Packages.props from turning on central package management for this probe. -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>

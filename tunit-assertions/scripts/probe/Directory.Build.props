@@ -1,0 +1,3 @@
+<Project>
+  <!-- Stops any enclosing repo's Directory.Build.props from applying to this throwaway probe. -->
+</Project>
