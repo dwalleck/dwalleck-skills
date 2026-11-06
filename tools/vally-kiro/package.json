@@ -1,0 +1,19 @@
+{
+  "name": "vally-kiro",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run Vally evals against Kiro CLI skills over ACP, with Kiro agents as judges",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": "./src/index.js",
+  "bin": { "vally-kiro": "bin/vally-kiro.mjs" },
+  "engines": { "node": ">=22.15.0" },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@microsoft/vally": "0.21.0",
+    "@microsoft/vally-cli": "0.21.0",
+    "yaml": "^2.9.1"
+  }
+}
