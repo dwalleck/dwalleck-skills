@@ -121,13 +121,15 @@ before W1.
   path; outside the reviewed repository). Write `diff.patch` (and
   `diff.full.patch` when a scope filter ran), `pr.json` for a PR,
   `instructions.md` (the extra free text, or `None.`), and `params.json`.
-- **W2 — Install.** Compare `<skill_dir>/assets/workflows/*.workflow.json`
-  with `~/.kiro/workflows/` and `<skill_dir>/assets/agents/*.json` with
-  `~/.kiro/agents/`; copy what is missing or different. If anything was
-  copied, tell the user once which files were installed or updated.
+- **W2 — Install.** Resolve `kiro_home` (`$KIRO_HOME` when it is set to an
+  absolute path, else `~/.kiro`; see the reference). Compare
+  `<skill_dir>/assets/workflows/*.workflow.json` with `<kiro_home>/workflows/`
+  and `<skill_dir>/assets/agents/*.json` with `<kiro_home>/agents/`; copy what
+  is missing or different. If anything was copied, tell the user once which
+  files were installed or updated.
 - **W3 — Launch** `run_workflow` with `workflowPath` set to the absolute path
-  of `~/.kiro/workflows/code-review-8.workflow.json` (medium, high) or
-  `~/.kiro/workflows/code-review-10.workflow.json` (max), passing the ten
+  of `<kiro_home>/workflows/code-review-8.workflow.json` (medium, high) or
+  `<kiro_home>/workflows/code-review-10.workflow.json` (max), passing the ten
   string inputs: `skill_dir`, `run_dir`, `repo_dir`, `diff_path`,
   `instructions_path`, `level`, `level_intro`, `verify_policy` (after
   `--verify`), `candidate_cap`, `findings_cap` (after `--max-findings`).

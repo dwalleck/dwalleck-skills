@@ -12,11 +12,5 @@
       { "capability": "shell", "match": ["git -C * log *", "git -C * show *", "git -C * blame *", "git -C * diff *", "git -C * grep *", "git -C * rev-parse *", "git -C * ls-files*", "gh pr view *"], "effect": "allow" },
       { "capability": "subagent", "match": ["code-review-worker"], "effect": "allow" }
     ]
-  },
-  "toolsSettings": {
-    "subagent": {
-      "availableAgents": ["code-review-worker"],
-      "trustedAgents": ["code-review-worker"]
-    }
   }
 }
